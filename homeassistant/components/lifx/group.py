@@ -141,6 +141,7 @@ class LIFXParallelGroupRuntime:
         self._stopped = False
         self._command_generation = 0
         self._projected_states: tuple[_ProjectedMemberState, ...] | None = None
+        self._pending_acknowledgements: set[tuple[int, int]] = set()
         self._confirmation_task: asyncio.Task[None] | None = None
 
     @property
@@ -190,6 +191,7 @@ class LIFXParallelGroupRuntime:
         self._stopped = True
         self._cancel_confirmation()
         self._projected_states = None
+        self._pending_acknowledgements.clear()
         await self._async_stop_software_effect()
         await self.parallel.async_stop()
         self.async_update_listeners()
@@ -224,11 +226,16 @@ class LIFXParallelGroupRuntime:
             duration = self.transition_on_duration or member.transition_on_duration
         return round(duration * 1000)
 
-    def _begin_projection(self, states: tuple[_ProjectedMemberState, ...]) -> int:
+    def _begin_projection(
+        self,
+        states: tuple[_ProjectedMemberState, ...],
+        acknowledgements: set[tuple[int, int]],
+    ) -> int:
         """Make a command target visible to the virtual light immediately."""
         self._command_generation += 1
         self._cancel_confirmation()
         self._projected_states = states
+        self._pending_acknowledgements = acknowledgements
         self.async_update_listeners()
         return self._command_generation
 
@@ -236,6 +243,7 @@ class LIFXParallelGroupRuntime:
         """Drop a failed command's projection if it is still current."""
         if generation == self._command_generation:
             self._projected_states = None
+            self._pending_acknowledgements.clear()
             self.async_update_listeners()
 
     def _apply_projected_states(
@@ -251,6 +259,7 @@ class LIFXParallelGroupRuntime:
             member.device.power_level = state.power_level
             member.async_set_updated_data(None)
         self._projected_states = None
+        self._pending_acknowledgements.clear()
         self.async_update_listeners()
 
     @callback
@@ -258,6 +267,7 @@ class LIFXParallelGroupRuntime:
         self,
         generation: int,
         index: int,
+        phase: int,
         state: _ProjectedMemberState,
     ) -> None:
         """Reflect one acknowledged command on its physical coordinator."""
@@ -267,6 +277,9 @@ class LIFXParallelGroupRuntime:
         member.device.color = list(state.color)
         member.device.power_level = state.power_level
         member.async_set_updated_data(None)
+        self._pending_acknowledgements.discard((index, phase))
+        if not self._pending_acknowledgements:
+            self._projected_states = None
         self.async_update_listeners()
 
     def _apply_confirmed_states(
@@ -282,6 +295,7 @@ class LIFXParallelGroupRuntime:
                 member.device.label = state.label
             member.async_set_updated_data(None)
         self._projected_states = None
+        self._pending_acknowledgements.clear()
         self.async_update_listeners()
 
     def _cancel_confirmation(self) -> None:
@@ -333,6 +347,7 @@ class LIFXParallelGroupRuntime:
         hsbk = find_hsbk(self.hass, **kwargs)
         staged: dict[int, tuple[Any, ...]] = {}
         commands: list[ParallelCommand] = []
+        acknowledged_states: dict[tuple[int, int], _ProjectedMemberState] = {}
         states: list[_ProjectedMemberState] = []
         durations: list[int] = []
 
@@ -346,29 +361,67 @@ class LIFXParallelGroupRuntime:
             )
             states.append(_ProjectedMemberState(target_color, target_power))
             durations.append(duration)
-            if power is True and color is not None and device.power_level == 0:
+            if power is False and color is not None:
+                color_command = ParallelCommand("color", (*color, duration))
+                power_command = ParallelCommand("power", (False, duration))
+                if device.power_level:
+                    commands.append(
+                        ParallelCommand(
+                            color_command.kind,
+                            color_command.payload,
+                            power_command,
+                        )
+                    )
+                    acknowledged_states[index, 0] = _ProjectedMemberState(
+                        target_color, device.power_level
+                    )
+                    acknowledged_states[index, 1] = states[index]
+                elif ATTR_TRANSITION in kwargs or duration:
+                    commands.append(
+                        ParallelCommand(
+                            power_command.kind,
+                            power_command.payload,
+                            color_command,
+                        )
+                    )
+                    acknowledged_states[index, 0] = _ProjectedMemberState(
+                        tuple(device.color), 0
+                    )
+                    acknowledged_states[index, 1] = states[index]
+                else:
+                    commands.append(color_command)
+                    acknowledged_states[index, 0] = states[index]
+            elif power is True and color is not None and device.power_level == 0:
                 staged[index] = (*color, 0)
                 commands.append(ParallelCommand("power", (True, duration)))
+                acknowledged_states[index, 0] = states[index]
             elif color is not None:
                 commands.append(ParallelCommand("color", (*color, duration)))
+                acknowledged_states[index, 0] = states[index]
             elif power is not None:
                 commands.append(ParallelCommand("power", (power, duration)))
+                acknowledged_states[index, 0] = states[index]
             else:
                 raise ValueError("LIFX group action did not contain a state change")
 
         await self._async_dispatch_projected_states(
-            tuple(commands), tuple(states), max(durations), staged
+            tuple(commands),
+            tuple(states),
+            acknowledged_states,
+            max(durations),
+            staged,
         )
 
     async def _async_dispatch_projected_states(
         self,
         commands: tuple[ParallelCommand, ...],
         states: tuple[_ProjectedMemberState, ...],
+        acknowledged_states: dict[tuple[int, int], _ProjectedMemberState],
         duration_ms: int,
         staged: dict[int, tuple[Any, ...]] | None = None,
     ) -> None:
         """Synchronize a command, then make physical cache updates after ACKs."""
-        generation = self._begin_projection(states)
+        generation = self._begin_projection(states, set(acknowledged_states))
         try:
             if staged:
                 staged_states = {
@@ -383,24 +436,26 @@ class LIFXParallelGroupRuntime:
                         self._apply_acknowledged_state,
                         generation,
                         index,
+                        -1,
                         staged_states[index],
                     )
 
                 await self.parallel.async_stage_colors(staged, on_stage_ack)
 
-            def on_ack(index: int) -> None:
+            def on_ack(index: int, phase: int) -> None:
                 self.hass.loop.call_soon_threadsafe(
                     self._apply_acknowledged_state,
                     generation,
                     index,
-                    states[index],
+                    phase,
+                    acknowledged_states[index, phase],
                 )
 
             await self.parallel.async_dispatch(commands, on_ack)
         except HomeAssistantError:
             self._schedule_confirmation(generation, 0, settle=False)
             raise
-        self._apply_projected_states(generation, states)
+        await asyncio.sleep(0)
         self._schedule_confirmation(generation, duration_ms)
 
     async def async_identify(self) -> None:
@@ -556,6 +611,7 @@ class LIFXParallelGroupRuntime:
                 ParallelCommand("color", (*state.color, duration)) for state in states
             ),
             states,
+            {(index, 0): state for index, state in enumerate(states)},
             duration,
         )
 
