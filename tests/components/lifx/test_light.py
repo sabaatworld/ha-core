@@ -45,6 +45,11 @@ from homeassistant.components.light import (
     SERVICE_TURN_ON,
     ColorMode,
 )
+from homeassistant.components.number import (
+    ATTR_VALUE,
+    DOMAIN as NUMBER_DOMAIN,
+    SERVICE_SET_VALUE,
+)
 from homeassistant.const import (
     ATTR_ENTITY_ID,
     CONF_HOST,
@@ -440,6 +445,50 @@ async def test_light_strip(hass: HomeAssistant) -> None:
         )
 
 
+async def test_transition_duration_legacy_multizone(hass: HomeAssistant) -> None:
+    """Test transition duration is sent to legacy multizone devices."""
+    config_entry = MockConfigEntry(
+        domain=DOMAIN, data={CONF_HOST: "127.0.0.1"}, unique_id=SERIAL
+    )
+    config_entry.add_to_hass(hass)
+    bulb = _mocked_light_strip()
+    bulb.power_level = 65535
+    bulb.color = [0, 65535, 65535, 3500]
+    bulb.color_zones = [
+        (0, 65535, 65535, 3500),
+        (1000, 65535, 65535, 3500),
+        (2000, 65535, 65535, 3500),
+    ]
+    with (
+        _patch_discovery(device=bulb),
+        _patch_config_flow_try_connect(device=bulb),
+        _patch_device(device=bulb),
+    ):
+        await async_setup_component(hass, lifx.DOMAIN, {lifx.DOMAIN: {}})
+        await hass.async_block_till_done()
+
+    await hass.services.async_call(
+        NUMBER_DOMAIN,
+        SERVICE_SET_VALUE,
+        {
+            ATTR_ENTITY_ID: "number.my_group_my_bulb_transition_on_duration",
+            ATTR_VALUE: 1.5,
+        },
+        blocking=True,
+    )
+    await hass.services.async_call(
+        LIGHT_DOMAIN,
+        "turn_on",
+        {ATTR_ENTITY_ID: "light.my_group_my_bulb", ATTR_BRIGHTNESS: 128},
+        blocking=True,
+    )
+
+    assert len(bulb.set_color_zones.calls) == 3
+    assert {
+        call[1]["duration"] for call in bulb.set_color_zones.calls
+    } == {1500}
+
+
 async def test_extended_multizone_messages(hass: HomeAssistant) -> None:
     """Test a light strip that supports extended multizone."""
     config_entry = MockConfigEntry(
@@ -488,6 +537,16 @@ async def test_extended_multizone_messages(hass: HomeAssistant) -> None:
     bulb.set_power.reset_mock()
 
     await hass.services.async_call(
+        NUMBER_DOMAIN,
+        SERVICE_SET_VALUE,
+        {
+            ATTR_ENTITY_ID: "number.my_group_my_bulb_transition_on_duration",
+            ATTR_VALUE: 1.5,
+        },
+        blocking=True,
+    )
+
+    await hass.services.async_call(
         LIGHT_DOMAIN,
         "turn_on",
         {ATTR_ENTITY_ID: entity_id, ATTR_BRIGHTNESS: 100},
@@ -495,6 +554,7 @@ async def test_extended_multizone_messages(hass: HomeAssistant) -> None:
     )
     assert len(bulb.set_color_zones.calls) == 0
     assert len(bulb.set_extended_color_zones.calls) == 1
+    assert bulb.set_extended_color_zones.calls[-1][1]["duration"] == 1500
 
     bulb.set_color_zones.reset_mock()
     bulb.set_extended_color_zones.reset_mock()
@@ -1868,6 +1928,83 @@ async def test_transitions_color_bulb(hass: HomeAssistant) -> None:
     assert call_dict == {"duration": 5000}
     bulb.set_power.reset_mock()
     bulb.set_waveform_optional.reset_mock()
+
+
+async def test_transition_duration_numbers(hass: HomeAssistant) -> None:
+    """Test transition duration numbers are used when a transition is absent."""
+    config_entry = MockConfigEntry(
+        domain=DOMAIN, data={CONF_HOST: "127.0.0.1"}, unique_id=SERIAL
+    )
+    config_entry.add_to_hass(hass)
+    bulb = _mocked_bulb_new_firmware()
+    bulb.power_level = 65535
+    bulb.color = [32000, None, 32000, 6000]
+    with (
+        _patch_discovery(device=bulb),
+        _patch_config_flow_try_connect(device=bulb),
+        _patch_device(device=bulb),
+    ):
+        await async_setup_component(hass, lifx.DOMAIN, {lifx.DOMAIN: {}})
+        await hass.async_block_till_done()
+
+    entity_id = "light.my_group_my_bulb"
+    await hass.services.async_call(
+        NUMBER_DOMAIN,
+        SERVICE_SET_VALUE,
+        {
+            ATTR_ENTITY_ID: "number.my_group_my_bulb_transition_on_duration",
+            ATTR_VALUE: 1.5,
+        },
+        blocking=True,
+    )
+    await hass.services.async_call(
+        NUMBER_DOMAIN,
+        SERVICE_SET_VALUE,
+        {
+            ATTR_ENTITY_ID: "number.my_group_my_bulb_transition_off_duration",
+            ATTR_VALUE: 2.5,
+        },
+        blocking=True,
+    )
+
+    await hass.services.async_call(
+        LIGHT_DOMAIN,
+        "turn_on",
+        {ATTR_ENTITY_ID: entity_id, ATTR_BRIGHTNESS: 100},
+        blocking=True,
+    )
+    assert bulb.set_waveform_optional.calls[-1][1]["value"]["period"] == 1500
+    bulb.set_waveform_optional.reset_mock()
+
+    await hass.services.async_call(
+        LIGHT_DOMAIN, "turn_off", {ATTR_ENTITY_ID: entity_id}, blocking=True
+    )
+    assert bulb.set_power.calls[-1][1]["duration"] == 2500
+    bulb.set_power.reset_mock()
+
+    await hass.services.async_call(
+        LIGHT_DOMAIN,
+        "turn_off",
+        {ATTR_ENTITY_ID: entity_id, ATTR_TRANSITION: 0},
+        blocking=True,
+    )
+    assert bulb.set_power.calls[-1][1]["duration"] == 0
+    bulb.set_power.reset_mock()
+
+    bulb.power_level = 0
+    await hass.services.async_call(
+        NUMBER_DOMAIN,
+        SERVICE_SET_VALUE,
+        {
+            ATTR_ENTITY_ID: "number.my_group_my_bulb_transition_off_duration",
+            ATTR_VALUE: 0,
+        },
+        blocking=True,
+    )
+    await hass.services.async_call(
+        LIGHT_DOMAIN, "turn_off", {ATTR_ENTITY_ID: entity_id}, blocking=True
+    )
+    assert "duration" not in bulb.set_power.calls[-1][1]
 
 
 async def test_lifx_set_state_brightness(hass: HomeAssistant) -> None:

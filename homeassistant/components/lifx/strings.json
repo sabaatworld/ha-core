@@ -36,6 +36,14 @@
         "name": "Clean cycle"
       }
     },
+    "number": {
+      "transition_on_duration": {
+        "name": "Fade On Time"
+      },
+      "transition_off_duration": {
+        "name": "Fade Off Time"
+      }
+    },
     "select": {
       "infrared_brightness": {
         "name": "Infrared brightness"

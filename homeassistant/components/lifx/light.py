@@ -236,8 +236,6 @@ class LIFXLight(LIFXEntity, LightEntity):
             )
             bulb.set_infrared(convert_8_to_16(kwargs[ATTR_INFRARED]))
 
-        fade = int(kwargs.get(ATTR_TRANSITION, 0) * 1000)
-
         if ATTR_BRIGHTNESS_STEP in kwargs or ATTR_BRIGHTNESS_STEP_PCT in kwargs:
             brightness = self.brightness if self.is_on and self.brightness else 0
 
@@ -256,11 +254,25 @@ class LIFXLight(LIFXEntity, LightEntity):
         power_on = kwargs.get(ATTR_POWER, False)
         power_off = not kwargs.get(ATTR_POWER, True)
 
+        has_transition = ATTR_TRANSITION in kwargs
+        if has_transition:
+            fade = int(kwargs[ATTR_TRANSITION] * 1000)
+        else:
+            default_transition = (
+                self.coordinator.transition_off_duration
+                if power_off
+                else self.coordinator.transition_on_duration
+            )
+            fade = int(default_transition * 1000)
+
         hsbk = find_hsbk(self.hass, **kwargs)
 
         if not self.is_on:
             if power_off:
-                await self.set_power(False)
+                if has_transition or fade:
+                    await self.set_power(False, duration=fade)
+                else:
+                    await self.set_power(False)
             # If fading on with color, set color immediately
             if hsbk and power_on:
                 await self.set_color(hsbk, kwargs)

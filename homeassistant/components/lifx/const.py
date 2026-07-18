@@ -57,6 +57,8 @@ ATTR_RSSI = "rssi"
 ATTR_ZONES = "zones"
 
 ATTR_THEME = "theme"
+TRANSITION_OFF_DURATION = "transition_off_duration"
+TRANSITION_ON_DURATION = "transition_on_duration"
 
 HEV_CYCLE_STATE = "hev_cycle_state"
 INFRARED_BRIGHTNESS = "infrared_brightness"

@@ -105,6 +105,8 @@ class LIFXUpdateCoordinator(DataUpdateCoordinator[None]):
         self._update_rssi: bool = False
         self._rssi: int = 0
         self.last_used_theme: str = ""
+        self.transition_on_duration: float = 0.0
+        self.transition_off_duration: float = 0.0
 
         super().__init__(
             hass,
