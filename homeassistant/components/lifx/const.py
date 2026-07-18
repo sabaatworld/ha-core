@@ -29,9 +29,15 @@ DEFAULT_ATTEMPTS = 5
 MAX_UPDATE_TIME = 90
 # The number of tries to send each request message to a bulb during an update
 MAX_ATTEMPTS_PER_UPDATE_REQUEST_MESSAGE = 5
+LIFX_STATE_SETTLE_DELAY = 0.3
 
 CONF_LABEL = "label"
 CONF_SERIAL = "serial"
+CONF_ENTRY_TYPE = "entry_type"
+CONF_GROUP_ID = "group_id"
+CONF_MEMBERS = "members"
+
+ENTRY_TYPE_PARALLEL_GROUP = "parallel_group"
 
 IDENTIFY_WAVEFORM = {
     "transient": True,

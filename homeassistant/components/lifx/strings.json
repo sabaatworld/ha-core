@@ -4,22 +4,20 @@
       "already_configured": "[%key:common::config_flow::abort::already_configured_device%]",
       "already_in_progress": "[%key:common::config_flow::abort::already_in_progress%]",
       "cannot_connect": "[%key:common::config_flow::error::cannot_connect%]",
+      "invalid_members": "The selected lights are not available physical LIFX devices.",
       "no_devices_found": "[%key:common::config_flow::abort::no_devices_found%]"
     },
     "error": {
-      "cannot_connect": "[%key:common::config_flow::error::cannot_connect%]"
+      "cannot_connect": "[%key:common::config_flow::error::cannot_connect%]",
+      "duplicate_members": "Select each light only once.",
+      "invalid_members": "The selected lights are not available physical LIFX devices."
     },
     "flow_title": "{label} ({group})",
     "step": {
       "discovery_confirm": {
         "description": "Do you want to set up {label} ({group})?"
       },
-      "pick_device": {
-        "data": {
-          "device": "[%key:common::config_flow::data::device%]"
-        }
-      },
-      "user": {
+      "device": {
         "data": {
           "host": "[%key:common::config_flow::data::host%]"
         },
@@ -27,6 +25,24 @@
           "host": "The hostname or IP address of your LIFX device."
         },
         "description": "If you leave the host empty, discovery will be used to find devices."
+      },
+      "pick_device": {
+        "data": {
+          "device": "[%key:common::config_flow::data::device%]"
+        }
+      },
+      "parallel_group": {
+        "data": {
+          "members": "Lights",
+          "name": "Group name"
+        },
+        "description": "Create a virtual LIFX light that dispatches commands to its members in parallel."
+      },
+      "user": {
+        "menu_options": {
+          "device": "Add Device by IP",
+          "parallel_group": "Add Device Group"
+        }
       }
     }
   },

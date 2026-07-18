@@ -235,7 +235,7 @@ class LIFXManager:
         """Initialize the manager."""
         self.hass = hass
         self.effects_conductor = aiolifx_effects.Conductor(hass.loop)
-        self.entity_id_to_coordinator: dict[str, LIFXUpdateCoordinator] = {}
+        self.entity_id_to_coordinator: dict[str, Any] = {}
 
     @callback
     def async_unload(self) -> None:
@@ -245,7 +245,7 @@ class LIFXManager:
 
     @callback
     def async_register_entity(
-        self, entity_id: str, coordinator: LIFXUpdateCoordinator
+        self, entity_id: str, coordinator: Any
     ) -> Callable[[], None]:
         """Register an entity to the config entry id."""
         self.entity_id_to_coordinator[entity_id] = coordinator
@@ -491,10 +491,21 @@ class LIFXManager:
         coordinators: list[LIFXUpdateCoordinator] = []
         bulbs: list[Light] = []
 
+        parallel_groups = [
+            controller
+            for entity_id, controller in self.entity_id_to_coordinator.items()
+            if entity_id in entity_ids
+            and not isinstance(controller, LIFXUpdateCoordinator)
+        ]
+        for parallel_group in parallel_groups:
+            if parallel_group.supports_effect(service):
+                await parallel_group.async_start_effect(service, **kwargs)
+
         coordinators = [
             coordinator
             for entity_id, coordinator in self.entity_id_to_coordinator.items()
             if entity_id in entity_ids
+            and isinstance(coordinator, LIFXUpdateCoordinator)
         ]
         bulbs = [coordinator.device for coordinator in coordinators]
         if start_effect_func := self._effect_dispatch.get(service):

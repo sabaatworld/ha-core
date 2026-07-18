@@ -23,9 +23,17 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.event import async_call_later, async_track_time_interval
 from homeassistant.helpers.typing import ConfigType
 
-from .const import DATA_LIFX_MANAGER, DOMAIN, LOGGER, TARGET_ANY
+from .const import (
+    CONF_ENTRY_TYPE,
+    DATA_LIFX_MANAGER,
+    DOMAIN,
+    ENTRY_TYPE_PARALLEL_GROUP,
+    LOGGER,
+    TARGET_ANY,
+)
 from .coordinator import LIFXConfigEntry, LIFXUpdateCoordinator
 from .discovery import async_discover_devices, async_trigger_discovery
+from .group import async_setup_parallel_group_entry, async_unload_parallel_group_entry
 from .manager import LIFXManager
 from .migration import async_migrate_entities_devices, async_migrate_legacy_entries
 from .util import async_entry_is_legacy, async_get_legacy_entry, formatted_serial
@@ -78,7 +86,11 @@ async def async_legacy_migration(
     existing_serials = {
         entry.unique_id
         for entry in hass.config_entries.async_entries(DOMAIN)
-        if entry.unique_id and not async_entry_is_legacy(entry)
+        if (
+            entry.unique_id
+            and not async_entry_is_legacy(entry)
+            and entry.data.get(CONF_ENTRY_TYPE) != ENTRY_TYPE_PARALLEL_GROUP
+        )
     }
     # device.mac_addr is not the mac_address, its the serial number
     hosts_by_serial = {device.mac_addr: device.ip_addr for device in discovered_devices}
@@ -186,6 +198,9 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: LIFXConfigEntry) -> bool:
     """Set up LIFX from a config entry."""
+    if entry.data.get(CONF_ENTRY_TYPE) == ENTRY_TYPE_PARALLEL_GROUP:
+        return await async_setup_parallel_group_entry(hass, entry)
+
     if async_entry_is_legacy(entry):
         return True
 
@@ -233,6 +248,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: LIFXConfigEntry) -> bool
 
 async def async_unload_entry(hass: HomeAssistant, entry: LIFXConfigEntry) -> bool:
     """Unload a config entry."""
+    if entry.data.get(CONF_ENTRY_TYPE) == ENTRY_TYPE_PARALLEL_GROUP:
+        return await async_unload_parallel_group_entry(hass, entry)
+
     if async_entry_is_legacy(entry):
         return True
     if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):

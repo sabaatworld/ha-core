@@ -35,10 +35,12 @@ from .const import (
     DOMAIN,
     INFRARED_BRIGHTNESS,
     LIFX_CEILING_PRODUCT_IDS,
+    LIFX_STATE_SETTLE_DELAY,
     LOGGER,
 )
 from .coordinator import FirmwareEffect, LIFXConfigEntry, LIFXUpdateCoordinator
 from .entity import LIFXEntity
+from .group import async_add_parallel_group_entities
 from .manager import (
     SERVICE_EFFECT_COLORLOOP,
     SERVICE_EFFECT_FLAME,
@@ -50,8 +52,6 @@ from .manager import (
     LIFXManager,
 )
 from .util import convert_8_to_16, convert_16_to_8, find_hsbk, lifx_features, merge_hsbk
-
-LIFX_STATE_SETTLE_DELAY = 0.3
 
 SERVICE_LIFX_SET_STATE = "set_state"
 
@@ -82,15 +82,19 @@ async def async_setup_entry(
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     """Set up LIFX from a config entry."""
-    coordinator = entry.runtime_data
-    manager = hass.data[DATA_LIFX_MANAGER]
-    device = coordinator.device
     platform = entity_platform.async_get_current_platform()
     platform.async_register_entity_service(
         SERVICE_LIFX_SET_STATE,
         LIFX_SET_STATE_SCHEMA,
         "set_state",
     )
+    if not isinstance(entry.runtime_data, LIFXUpdateCoordinator):
+        async_add_parallel_group_entities(entry, async_add_entities, Platform.LIGHT)
+        return
+
+    coordinator = entry.runtime_data
+    manager = hass.data[DATA_LIFX_MANAGER]
+    device = coordinator.device
     platform.async_register_entity_service(
         SERVICE_LIFX_SET_HEV_CYCLE_STATE,
         LIFX_SET_HEV_CYCLE_STATE_SCHEMA,

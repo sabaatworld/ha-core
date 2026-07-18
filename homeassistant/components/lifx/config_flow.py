@@ -2,6 +2,7 @@
 
 import socket
 from typing import Any, Self, override
+from uuid import uuid4
 
 from aiolifx.aiolifx import Light
 from aiolifx.connection import LIFXConnection
@@ -10,15 +11,19 @@ import voluptuous as vol
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_DEVICE, CONF_HOST
 from homeassistant.core import callback
-from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import device_registry as dr, entity_registry as er, selector
 from homeassistant.helpers.service_info.dhcp import DhcpServiceInfo
 from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 from homeassistant.helpers.typing import DiscoveryInfoType
 
 from .const import (
+    CONF_ENTRY_TYPE,
+    CONF_GROUP_ID,
+    CONF_MEMBERS,
     CONF_SERIAL,
     DEFAULT_ATTEMPTS,
     DOMAIN,
+    ENTRY_TYPE_PARALLEL_GROUP,
     LOGGER,
     OVERALL_TIMEOUT,
     TARGET_ANY,
@@ -58,6 +63,7 @@ class LifXConfigFlow(ConfigFlow, domain=DOMAIN):
             if (
                 entry.unique_id
                 and not async_entry_is_legacy(entry)
+                and entry.data.get(CONF_ENTRY_TYPE) != ENTRY_TYPE_PARALLEL_GROUP
                 and mac_matches_serial_number(mac, entry.unique_id)
             ):
                 if entry.data[CONF_HOST] != host:
@@ -156,6 +162,14 @@ class LifXConfigFlow(ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Handle the initial step."""
+        return self.async_show_menu(
+            step_id="user", menu_options=["device", "parallel_group"]
+        )
+
+    async def async_step_device(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Handle manual device setup."""
         errors = {}
         if user_input is not None:
             host = user_input[CONF_HOST]
@@ -169,8 +183,86 @@ class LifXConfigFlow(ConfigFlow, domain=DOMAIN):
                 return self._async_create_entry_from_device(device)
 
         return self.async_show_form(
-            step_id="user",
+            step_id="device",
             data_schema=vol.Schema({vol.Optional(CONF_HOST, default=""): str}),
+            errors=errors,
+        )
+
+    async def async_step_parallel_group(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Create a parallel LIFX group."""
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            members = user_input[CONF_MEMBERS]
+            if not members:
+                errors["base"] = "invalid_members"
+            elif len(members) != len(set(members)):
+                errors["base"] = "duplicate_members"
+            else:
+                entity_registry = er.async_get(self.hass)
+                member_entry_ids: list[str] = []
+                for entity_id in members:
+                    registry_entry = entity_registry.async_get(entity_id)
+                    if (
+                        registry_entry is None
+                        or registry_entry.platform != DOMAIN
+                        or registry_entry.config_entry_id is None
+                    ):
+                        errors["base"] = "invalid_members"
+                        break
+                    member_entry = self.hass.config_entries.async_get_entry(
+                        registry_entry.config_entry_id
+                    )
+                    if (
+                        member_entry is None
+                        or member_entry.domain != DOMAIN
+                        or member_entry.data.get(CONF_ENTRY_TYPE)
+                        == ENTRY_TYPE_PARALLEL_GROUP
+                    ):
+                        errors["base"] = "invalid_members"
+                        break
+                    member_entry_ids.append(member_entry.entry_id)
+
+                if not errors:
+                    normalized_members = sorted(member_entry_ids)
+                    if len(normalized_members) != len(set(normalized_members)):
+                        errors["base"] = "duplicate_members"
+                    else:
+                        for entry in self._async_current_entries():
+                            if (
+                                entry.data.get(CONF_ENTRY_TYPE)
+                                == ENTRY_TYPE_PARALLEL_GROUP
+                                and sorted(entry.data[CONF_MEMBERS])
+                                == normalized_members
+                            ):
+                                return self.async_abort(reason="already_configured")
+                    if not errors:
+                        group_id = uuid4().hex
+                        await self.async_set_unique_id(
+                            f"parallel-group-{group_id}", raise_on_progress=False
+                        )
+                        return self.async_create_entry(
+                            title=user_input["name"],
+                            data={
+                                CONF_ENTRY_TYPE: ENTRY_TYPE_PARALLEL_GROUP,
+                                CONF_GROUP_ID: group_id,
+                                CONF_MEMBERS: normalized_members,
+                            },
+                        )
+
+        return self.async_show_form(
+            step_id="parallel_group",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("name"): selector.TextSelector(),
+                    vol.Required(CONF_MEMBERS): selector.EntitySelector(
+                        selector.EntitySelectorConfig(
+                            integration=DOMAIN, domain="light", multiple=True
+                        )
+                    ),
+                }
+            ),
             errors=errors,
         )
 
@@ -192,7 +284,11 @@ class LifXConfigFlow(ConfigFlow, domain=DOMAIN):
         configured_serials: set[str] = set()
         configured_hosts: set[str] = set()
         for entry in self._async_current_entries():
-            if entry.unique_id and not async_entry_is_legacy(entry):
+            if (
+                entry.unique_id
+                and not async_entry_is_legacy(entry)
+                and entry.data.get(CONF_ENTRY_TYPE) != ENTRY_TYPE_PARALLEL_GROUP
+            ):
                 configured_serials.add(entry.unique_id)
                 configured_hosts.add(entry.data[CONF_HOST])
         self._discovered_devices = {

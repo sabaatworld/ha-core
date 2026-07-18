@@ -3,13 +3,14 @@
 from typing import override
 
 from homeassistant.components.number import NumberEntityDescription, RestoreNumber
-from homeassistant.const import EntityCategory
+from homeassistant.const import EntityCategory, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import TRANSITION_OFF_DURATION, TRANSITION_ON_DURATION
 from .coordinator import LIFXConfigEntry, LIFXUpdateCoordinator
 from .entity import LIFXEntity
+from .group import async_add_parallel_group_entities
 
 TRANSITION_DURATION_ENTITIES = (
     NumberEntityDescription(
@@ -39,6 +40,10 @@ async def async_setup_entry(
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     """Set up LIFX number entities."""
+    if not isinstance(entry.runtime_data, LIFXUpdateCoordinator):
+        async_add_parallel_group_entities(entry, async_add_entities, Platform.NUMBER)
+        return
+
     coordinator = entry.runtime_data
     async_add_entities(
         LIFXTransitionDurationNumber(coordinator, description)
