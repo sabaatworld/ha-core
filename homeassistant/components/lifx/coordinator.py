@@ -2,7 +2,7 @@
 
 import asyncio
 from collections.abc import Callable
-from datetime import timedelta
+from datetime import datetime, timedelta
 from enum import IntEnum
 from functools import partial
 from math import floor, log10
@@ -27,10 +27,11 @@ from homeassistant.const import (
     SIGNAL_STRENGTH_DECIBELS_MILLIWATT,
     Platform,
 )
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.debounce import Debouncer
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import (
@@ -39,6 +40,7 @@ from .const import (
     DOMAIN,
     IDENTIFY_WAVEFORM,
     LIFX_128ZONE_CEILING_PRODUCT_IDS,
+    LIFX_STATE_SETTLE_DELAY,
     LOGGER,
     MAX_ATTEMPTS_PER_UPDATE_REQUEST_MESSAGE,
     MAX_UPDATE_TIME,
@@ -107,6 +109,8 @@ class LIFXUpdateCoordinator(DataUpdateCoordinator[None]):
         self.last_used_theme: str = ""
         self.transition_on_duration: float = 0.0
         self.transition_off_duration: float = 0.0
+        self._postponed_refresh: CALLBACK_TYPE | None = None
+        self._post_command_generation = 0
 
         super().__init__(
             hass,
@@ -127,6 +131,41 @@ class LIFXUpdateCoordinator(DataUpdateCoordinator[None]):
         self.device.timeout = MESSAGE_TIMEOUT
         self.device.retry_count = MESSAGE_RETRIES
         self.device.unregister_timeout = UNAVAILABLE_GRACE
+
+    async def async_schedule_post_command_refresh(self, duration_ms: int) -> None:
+        """Refresh state after a command while superseding older commands."""
+        self._post_command_generation += 1
+        generation = self._post_command_generation
+        if self._postponed_refresh is not None:
+            self._postponed_refresh()
+            self._postponed_refresh = None
+
+        await asyncio.sleep(LIFX_STATE_SETTLE_DELAY)
+        if generation != self._post_command_generation:
+            return
+        await self.async_request_refresh()
+
+        if duration_ms <= 0:
+            return
+
+        async def _async_refresh(_now: datetime) -> None:
+            """Refresh state once the current transition has completed."""
+            if generation == self._post_command_generation:
+                await self.async_refresh()
+
+        self._postponed_refresh = async_call_later(
+            self.hass,
+            timedelta(milliseconds=duration_ms),
+            _async_refresh,
+        )
+
+    @callback
+    def async_cancel_post_command_refresh(self) -> None:
+        """Cancel a delayed physical-state refresh."""
+        self._post_command_generation += 1
+        if self._postponed_refresh is not None:
+            self._postponed_refresh()
+            self._postponed_refresh = None
 
     @property
     def rssi(self) -> int:

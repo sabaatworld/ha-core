@@ -623,11 +623,7 @@ class LIFXParallelRuntime:
         on_ack: Callable[[int, int], None] | None = None,
     ) -> None:
         """Stage a command per worker, then receive its acknowledgement."""
-        try:
-            await self.hass.async_add_executor_job(self._dispatch, commands, on_ack)
-        except _ParallelPreparationError:
-            await self.async_stop()
-            raise
+        await self.hass.async_add_executor_job(self._dispatch, commands, on_ack)
 
     async def async_stage_colors(
         self,
@@ -646,7 +642,7 @@ class LIFXParallelRuntime:
         self, colors: dict[int, tuple[Any, ...]], on_ack: Callable[[int], None] | None
     ) -> None:
         if not self.available:
-            raise HomeAssistantError("The LIFX parallel group is unavailable")
+            raise HomeAssistantError("The LIFX Device Group transport is unavailable")
         with self._lock:
             self._request_id += 1
             request_id = self._request_id
@@ -681,7 +677,7 @@ class LIFXParallelRuntime:
         on_ack: Callable[[int, int], None] | None,
     ) -> None:
         if len(commands) != len(self._workers) or not self.available:
-            raise HomeAssistantError("The LIFX parallel group is unavailable")
+            raise HomeAssistantError("The LIFX Device Group transport is unavailable")
         with self._lock:
             self._request_id += 1
             request_id = self._request_id
@@ -697,7 +693,6 @@ class LIFXParallelRuntime:
                     worker.pipe.send(("PREPARE", request_id, tuple(command_specs)))
                 self._collect("READY", 5.0, request_id)
             except (BrokenPipeError, EOFError, HomeAssistantError, OSError) as err:
-                self._stop_event.set()
                 for dispatch_gate in self._dispatch_gates:
                     for _worker in self._workers:
                         dispatch_gate.release()
@@ -736,7 +731,6 @@ class LIFXParallelRuntime:
                     request_id,
                 )
             except (BrokenPipeError, EOFError, HomeAssistantError, OSError) as err:
-                self._stop_event.set()
                 for _worker in second_workers.values():
                     self._dispatch_gates[1].release()
                 raise _ParallelPreparationError(str(err)) from err
@@ -781,7 +775,7 @@ class LIFXParallelRuntime:
 
     def _query_states(self) -> tuple[ParallelLightState, ...]:
         if not self.available:
-            raise HomeAssistantError("The LIFX parallel group is unavailable")
+            raise HomeAssistantError("The LIFX Device Group transport is unavailable")
         with self._lock:
             self._request_id += 1
             request_id = self._request_id

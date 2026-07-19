@@ -2,7 +2,7 @@
 
 from datetime import timedelta
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiolifx_effects
 import pytest
@@ -10,6 +10,7 @@ import pytest
 from homeassistant.components import lifx
 from homeassistant.components.lifx import DOMAIN
 from homeassistant.components.lifx.const import ATTR_POWER
+from homeassistant.components.lifx.coordinator import LIFXUpdateCoordinator
 from homeassistant.components.lifx.light import ATTR_INFRARED, ATTR_ZONES
 from homeassistant.components.lifx.manager import (
     ATTR_CLOUD_SATURATION_MAX,
@@ -86,10 +87,35 @@ from . import (
 from tests.common import MockConfigEntry, async_fire_time_changed
 
 
+async def test_post_command_refresh_waits_for_lifx_settle_delay(
+    hass: HomeAssistant,
+) -> None:
+    """The coordinator starts the normal refresh after the LIFX settle delay."""
+    connection = MagicMock(device=_mocked_bulb())
+    entry = MockConfigEntry(domain=DOMAIN, data={CONF_HOST: IP_ADDRESS})
+    coordinator = LIFXUpdateCoordinator(hass, entry, connection)
+    coordinator.async_request_refresh = AsyncMock()
+
+    with (
+        patch("homeassistant.components.lifx.coordinator.LIFX_STATE_SETTLE_DELAY", 0.3),
+        patch(
+            "homeassistant.components.lifx.coordinator.asyncio.sleep",
+            new_callable=AsyncMock,
+        ) as sleep,
+    ):
+        await coordinator.async_schedule_post_command_refresh(0)
+
+    sleep.assert_awaited_once_with(0.3)
+    coordinator.async_request_refresh.assert_awaited_once()
+
+
 @pytest.fixture(autouse=True)
 def patch_lifx_state_settle_delay():
     """Set asyncio.sleep for state settles to zero."""
-    with patch("homeassistant.components.lifx.light.LIFX_STATE_SETTLE_DELAY", 0):
+    with (
+        patch("homeassistant.components.lifx.light.LIFX_STATE_SETTLE_DELAY", 0),
+        patch("homeassistant.components.lifx.coordinator.LIFX_STATE_SETTLE_DELAY", 0),
+    ):
         yield
 
 
@@ -471,7 +497,7 @@ async def test_transition_duration_legacy_multizone(hass: HomeAssistant) -> None
         NUMBER_DOMAIN,
         SERVICE_SET_VALUE,
         {
-            ATTR_ENTITY_ID: "number.my_group_my_bulb_transition_on_duration",
+            ATTR_ENTITY_ID: "number.my_group_my_bulb_fade_on_time",
             ATTR_VALUE: 1.5,
         },
         blocking=True,
@@ -484,9 +510,7 @@ async def test_transition_duration_legacy_multizone(hass: HomeAssistant) -> None
     )
 
     assert len(bulb.set_color_zones.calls) == 3
-    assert {
-        call[1]["duration"] for call in bulb.set_color_zones.calls
-    } == {1500}
+    assert {call[1]["duration"] for call in bulb.set_color_zones.calls} == {1500}
 
 
 async def test_extended_multizone_messages(hass: HomeAssistant) -> None:
@@ -540,7 +564,7 @@ async def test_extended_multizone_messages(hass: HomeAssistant) -> None:
         NUMBER_DOMAIN,
         SERVICE_SET_VALUE,
         {
-            ATTR_ENTITY_ID: "number.my_group_my_bulb_transition_on_duration",
+            ATTR_ENTITY_ID: "number.my_group_my_bulb_fade_on_time",
             ATTR_VALUE: 1.5,
         },
         blocking=True,
@@ -1952,7 +1976,7 @@ async def test_transition_duration_numbers(hass: HomeAssistant) -> None:
         NUMBER_DOMAIN,
         SERVICE_SET_VALUE,
         {
-            ATTR_ENTITY_ID: "number.my_group_my_bulb_transition_on_duration",
+            ATTR_ENTITY_ID: "number.my_group_my_bulb_fade_on_time",
             ATTR_VALUE: 1.5,
         },
         blocking=True,
@@ -1961,7 +1985,7 @@ async def test_transition_duration_numbers(hass: HomeAssistant) -> None:
         NUMBER_DOMAIN,
         SERVICE_SET_VALUE,
         {
-            ATTR_ENTITY_ID: "number.my_group_my_bulb_transition_off_duration",
+            ATTR_ENTITY_ID: "number.my_group_my_bulb_fade_off_time",
             ATTR_VALUE: 2.5,
         },
         blocking=True,
@@ -1996,7 +2020,7 @@ async def test_transition_duration_numbers(hass: HomeAssistant) -> None:
         NUMBER_DOMAIN,
         SERVICE_SET_VALUE,
         {
-            ATTR_ENTITY_ID: "number.my_group_my_bulb_transition_off_duration",
+            ATTR_ENTITY_ID: "number.my_group_my_bulb_fade_off_time",
             ATTR_VALUE: 0,
         },
         blocking=True,

@@ -36,7 +36,7 @@
           "members": "Lights",
           "name": "Group name"
         },
-        "description": "Create a virtual LIFX light that dispatches commands to its members in parallel."
+        "description": "Create a virtual LIFX Device Group that dispatches commands to its member lights together."
       },
       "user": {
         "menu_options": {

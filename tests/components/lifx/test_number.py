@@ -5,8 +5,8 @@ from homeassistant.components.lifx import DOMAIN
 from homeassistant.components.number import (
     ATTR_VALUE,
     DOMAIN as NUMBER_DOMAIN,
-    NumberExtraStoredData,
     SERVICE_SET_VALUE,
+    NumberExtraStoredData,
 )
 from homeassistant.const import ATTR_ENTITY_ID, ATTR_FRIENDLY_NAME, CONF_HOST
 from homeassistant.core import HomeAssistant, State
@@ -38,23 +38,20 @@ async def test_transition_duration_numbers(hass: HomeAssistant) -> None:
         await async_setup_component(hass, lifx.DOMAIN, {lifx.DOMAIN: {}})
         await hass.async_block_till_done()
 
-    entity_id = "number.my_group_my_bulb_transition_on_duration"
+    entity_id = "number.my_group_my_bulb_fade_on_time"
     state = hass.states.get(entity_id)
     assert state is not None
-    assert state.state == "0"
+    assert state.state == "0.0"
     assert state.attributes["min"] == 0
     assert state.attributes["max"] == 300
     assert state.attributes["step"] == 0.1
     assert state.attributes["unit_of_measurement"] == "s"
     assert state.attributes[ATTR_FRIENDLY_NAME] == "My Bulb Fade On Time"
+    assert hass.states.get("number.my_group_my_bulb_fade_off_time").state == "0.0"
     assert (
-        hass.states.get("number.my_group_my_bulb_transition_off_duration").state
-        == "0"
-    )
-    assert (
-        hass.states[
-            "number.my_group_my_bulb_transition_off_duration"
-        ].attributes[ATTR_FRIENDLY_NAME]
+        hass.states.get("number.my_group_my_bulb_fade_off_time").attributes[
+            ATTR_FRIENDLY_NAME
+        ]
         == "My Bulb Fade Off Time"
     )
 
@@ -72,7 +69,7 @@ async def test_transition_duration_numbers(hass: HomeAssistant) -> None:
 
 async def test_transition_duration_number_restores_value(hass: HomeAssistant) -> None:
     """Test a transition duration number restores its native value."""
-    entity_id = "number.my_group_my_bulb_transition_off_duration"
+    entity_id = "number.my_group_my_bulb_fade_off_time"
     mock_restore_cache_with_extra_data(
         hass,
         (

@@ -1,7 +1,6 @@
 """Support for LIFX lights."""
 
 import asyncio
-from datetime import datetime, timedelta
 from typing import Any, override
 
 import aiolifx_effects as aiolifx_effects_module
@@ -19,11 +18,10 @@ from homeassistant.components.light import (
     LightEntityFeature,
 )
 from homeassistant.const import ATTR_ENTITY_ID, Platform
-from homeassistant.core import CALLBACK_TYPE, HomeAssistant
+from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv, entity_platform
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
-from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.typing import VolDictType
 
 from .const import (
@@ -40,7 +38,6 @@ from .const import (
 )
 from .coordinator import FirmwareEffect, LIFXConfigEntry, LIFXUpdateCoordinator
 from .entity import LIFXEntity
-from .group import async_add_parallel_group_entities
 from .manager import (
     SERVICE_EFFECT_COLORLOOP,
     SERVICE_EFFECT_FLAME,
@@ -51,6 +48,7 @@ from .manager import (
     SERVICE_EFFECT_STOP,
     LIFXManager,
 )
+from .parallel_group import async_add_parallel_group_entities
 from .util import convert_8_to_16, convert_16_to_8, find_hsbk, lifx_features, merge_hsbk
 
 SERVICE_LIFX_SET_STATE = "set_state"
@@ -137,7 +135,6 @@ class LIFXLight(LIFXEntity, LightEntity):
         self.effects_conductor: aiolifx_effects_module.Conductor = (
             manager.effects_conductor
         )
-        self.postponed_update: CALLBACK_TYPE | None = None
         self.entry = entry
         self._attr_unique_id = self.coordinator.serial_number
         self._attr_min_color_temp_kelvin = bulb_features["min_kelvin"]
@@ -182,28 +179,8 @@ class LIFXLight(LIFXEntity, LightEntity):
 
     async def update_during_transition(self, when: int) -> None:
         """Update state at the start and end of a transition."""
-        self._cancel_postponed_update()
-
-        # Transition has started
         self.async_write_ha_state()
-
-        # The state reply we get back may be stale so we also request
-        # a refresh to get a fresh state
-        # https://lan.developer.lifx.com/docs/changing-a-device
-        await self.coordinator.async_request_refresh()
-
-        # Transition has ended
-        if when > 0:
-
-            async def _async_refresh(now: datetime) -> None:
-                """Refresh the state."""
-                await self.coordinator.async_refresh()
-
-            self.postponed_update = async_call_later(
-                self.hass,
-                timedelta(milliseconds=when),
-                _async_refresh,
-            )
+        await self.coordinator.async_schedule_post_command_refresh(when)
 
     @override
     async def async_turn_on(self, **kwargs: Any) -> None:
@@ -292,9 +269,6 @@ class LIFXLight(LIFXEntity, LightEntity):
                 await self.set_color(hsbk, kwargs, duration=fade)
             if power_off:
                 await self.set_power(False, duration=fade)
-
-        # Avoid state ping-pong by holding off updates as the state settles
-        await asyncio.sleep(LIFX_STATE_SETTLE_DELAY)
 
         # Update when the transition starts and ends
         await self.update_during_transition(fade)
@@ -391,16 +365,10 @@ class LIFXLight(LIFXEntity, LightEntity):
         )
         return await super().async_added_to_hass()
 
-    def _cancel_postponed_update(self) -> None:
-        """Cancel postponed update, if applicable."""
-        if self.postponed_update:
-            self.postponed_update()
-            self.postponed_update = None
-
     @override
     async def async_will_remove_from_hass(self) -> None:
         """Run when entity will be removed from hass."""
-        self._cancel_postponed_update()
+        self.coordinator.async_cancel_post_command_refresh()
         return await super().async_will_remove_from_hass()
 
 

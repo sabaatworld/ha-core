@@ -33,9 +33,12 @@ from .const import (
 )
 from .coordinator import LIFXConfigEntry, LIFXUpdateCoordinator
 from .discovery import async_discover_devices, async_trigger_discovery
-from .group import async_setup_parallel_group_entry, async_unload_parallel_group_entry
 from .manager import LIFXManager
 from .migration import async_migrate_entities_devices, async_migrate_legacy_entries
+from .parallel_group import (
+    async_setup_parallel_group_entry,
+    async_unload_parallel_group_entry,
+)
 from .util import async_entry_is_legacy, async_get_legacy_entry, formatted_serial
 
 CONF_SERVER = "server"

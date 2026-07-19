@@ -14,7 +14,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from .const import IDENTIFY, RESTART
 from .coordinator import LIFXConfigEntry, LIFXUpdateCoordinator
 from .entity import LIFXEntity
-from .group import async_add_parallel_group_entities
+from .parallel_group import async_add_parallel_group_entities
 
 RESTART_BUTTON_DESCRIPTION = ButtonEntityDescription(
     key=RESTART,
