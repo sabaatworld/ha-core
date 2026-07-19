@@ -47,13 +47,14 @@ symlink to this directory.
   `sensor.py`
 - Integration tests: `tests/components/lifx/`
 
-Run Home Assistant development commands from the repository root:
+Run all Git commands and every test on the Home Assistant host from the
+repository root. Do not run Git or test commands from the mounted macOS
+checkout:
 
 ```sh
-cd /Volumes/config/workplace/ha-core
-script/setup                         # first-time or refreshed local environment
-uv run pytest tests/components/lifx  # focused LIFX test suite
-uv run prek run --all-files          # before finishing a code session
+ssh root@192.168.8.28 'cd /config/workplace/ha-core && .venv/bin/python -m pytest tests/components/lifx'
+ssh root@192.168.8.28 'cd /config/workplace/ha-core && .venv/bin/python -m prek run --all-files'
+ssh root@192.168.8.28 'cd /config/workplace/ha-core && git status --short'
 ```
 
 Follow the parent repository's `AGENTS.md` for general Home Assistant coding

@@ -31,6 +31,7 @@ STATE_SERVICE = 3
 SET_COLOR = 102
 SET_POWER = 117
 SET_WAVEFORM_OPTIONAL = 119
+ACKNOWLEDGEMENT = 45
 SET_REBOOT = 38
 SET_MULTIZONE_EFFECT = 508
 SET_TILE_EFFECT = 719
@@ -40,6 +41,14 @@ class _ParallelPreparationError(HomeAssistantError):
     """A worker failed before the shared send deadline."""
 
 
+class _ParallelAckTimeout(HomeAssistantError):
+    """A required acknowledgement did not arrive from every member."""
+
+
+class _ParallelPreempted(HomeAssistantError):
+    """A newer request replaced the active staged dispatch."""
+
+
 @dataclass(frozen=True, slots=True)
 class ParallelCommand:
     """One already-resolved instruction for a single worker."""
@@ -47,6 +56,12 @@ class ParallelCommand:
     kind: str
     payload: tuple[Any, ...]
     second: ParallelCommand | None = None
+
+    @property
+    def stages(self) -> tuple[ParallelCommand, ...]:
+        """Return this command's ordered dependency stages."""
+        command = ParallelCommand(self.kind, self.payload)
+        return (command,) if self.second is None else (command, *self.second.stages)
 
 
 @dataclass(slots=True)
@@ -97,29 +112,48 @@ def _get_service(source: int, sequence: int) -> bytes:
 
 
 def _set_color(
-    source: int, sequence: int, target: bytes, payload: tuple[Any, ...]
+    source: int,
+    sequence: int,
+    target: bytes,
+    payload: tuple[Any, ...],
+    *,
+    ack_required: bool = False,
 ) -> bytes:
     hue, saturation, brightness, kelvin, duration = payload
     body = COLOR_PAYLOAD.pack(0, hue, saturation, brightness, kelvin, duration)
     return (
-        _header(SET_COLOR, source, sequence, target, len(body))
+        _header(
+            SET_COLOR, source, sequence, target, len(body), ack_required=ack_required
+        )
         + body
     )
 
 
 def _set_power(
-    source: int, sequence: int, target: bytes, payload: tuple[Any, ...]
+    source: int,
+    sequence: int,
+    target: bytes,
+    payload: tuple[Any, ...],
+    *,
+    ack_required: bool = False,
 ) -> bytes:
     power, duration = payload
     body = POWER_PAYLOAD.pack(65535 if power else 0, duration)
     return (
-        _header(SET_POWER, source, sequence, target, len(body))
+        _header(
+            SET_POWER, source, sequence, target, len(body), ack_required=ack_required
+        )
         + body
     )
 
 
 def _set_waveform_optional(
-    source: int, sequence: int, target: bytes, payload: tuple[Any, ...]
+    source: int,
+    sequence: int,
+    target: bytes,
+    payload: tuple[Any, ...],
+    *,
+    ack_required: bool = False,
 ) -> bytes:
     (
         transient,
@@ -159,17 +193,25 @@ def _set_waveform_optional(
             sequence,
             target,
             len(body),
+            ack_required=ack_required,
         )
         + body
     )
 
 
-def _set_reboot(source: int, sequence: int, target: bytes) -> bytes:
-    return _header(SET_REBOOT, source, sequence, target, 0)
+def _set_reboot(
+    source: int, sequence: int, target: bytes, *, ack_required: bool = False
+) -> bytes:
+    return _header(SET_REBOOT, source, sequence, target, 0, ack_required=ack_required)
 
 
 def _set_multizone_effect(
-    source: int, sequence: int, target: bytes, payload: tuple[Any, ...]
+    source: int,
+    sequence: int,
+    target: bytes,
+    payload: tuple[Any, ...],
+    *,
+    ack_required: bool = False,
 ) -> bytes:
     """Build a SetMultiZoneEffect packet."""
     effect, speed, direction = payload
@@ -184,13 +226,19 @@ def _set_multizone_effect(
             sequence,
             target,
             len(body),
+            ack_required=ack_required,
         )
         + body
     )
 
 
 def _set_tile_effect(
-    source: int, sequence: int, target: bytes, payload: tuple[Any, ...]
+    source: int,
+    sequence: int,
+    target: bytes,
+    payload: tuple[Any, ...],
+    *,
+    ack_required: bool = False,
 ) -> bytes:
     """Build a SetTileEffect packet."""
     effect, speed, sky_type, cloud_saturation_min, cloud_saturation_max, palette = (
@@ -230,6 +278,7 @@ def _set_tile_effect(
             sequence,
             target,
             len(body),
+            ack_required=ack_required,
         )
         + body
     )
@@ -280,60 +329,197 @@ def _preflight(udp: socket.socket, source: int, next_sequence: Any) -> bytes:
     raise TimeoutError("Timed out waiting for LIFX service response")
 
 
+def _build_packet(
+    command: ParallelCommand,
+    source: int,
+    target: bytes,
+    next_sequence: Callable[[], int],
+    *,
+    ack_required: bool,
+) -> tuple[bytes, int]:
+    """Build one packet and retain the sequence needed for its ACK."""
+    packet_sequence = next_sequence()
+    if command.kind == "color":
+        packet = _set_color(
+            source,
+            packet_sequence,
+            target,
+            command.payload,
+            ack_required=ack_required,
+        )
+    elif command.kind == "power":
+        packet = _set_power(
+            source,
+            packet_sequence,
+            target,
+            command.payload,
+            ack_required=ack_required,
+        )
+    elif command.kind == "waveform_optional":
+        packet = _set_waveform_optional(
+            source,
+            packet_sequence,
+            target,
+            command.payload,
+            ack_required=ack_required,
+        )
+    elif command.kind == "reboot":
+        packet = _set_reboot(
+            source, packet_sequence, target, ack_required=ack_required
+        )
+    elif command.kind == "multizone_effect":
+        packet = _set_multizone_effect(
+            source,
+            packet_sequence,
+            target,
+            command.payload,
+            ack_required=ack_required,
+        )
+    elif command.kind == "tile_effect":
+        packet = _set_tile_effect(
+            source,
+            packet_sequence,
+            target,
+            command.payload,
+            ack_required=ack_required,
+        )
+    else:
+        raise ValueError(f"unsupported command: {command.kind}")
+    return packet, packet_sequence
+
+
+def _wait_for_ack(
+    udp: socket.socket,
+    pipe: Connection,
+    source: int,
+    target: bytes,
+    sequence: int,
+    request_id: int,
+    stage: int,
+    current_generation: Any,
+    stage_deadline: float,
+) -> bool | None:
+    """Wait for a matching ACK, or abandon a request superseded in flight."""
+    deadline = min(time.monotonic() + 3.0, stage_deadline)
+    while (remaining := deadline - time.monotonic()) > 0:
+        if current_generation.value != request_id:
+            return None
+        if pipe.poll(0):
+            control = pipe.recv()
+            if control[:3] == ("CANCEL", request_id, stage):
+                return None
+        try:
+            udp.settimeout(min(0.01, remaining))
+        except OSError:
+            return False
+        try:
+            data = udp.recv(2048)
+        except TimeoutError:
+            continue
+        except OSError:
+            return False
+        try:
+            response_source, response_sequence, response_target, packet_type = _parse_header(
+                data
+            )
+        except (struct.error, ValueError):
+            continue
+        if (
+            response_source == source
+            and response_sequence == sequence
+            and response_target == target
+            and packet_type == ACKNOWLEDGEMENT
+            and len(data) == HEADER_SIZE
+        ):
+            return True
+    return False
+
+
 def _dispatch_prepared(
     udp: socket.socket,
     source: int,
     target: bytes,
     pipe: Connection,
     request_id: int,
-    command_specs: tuple[tuple[str, tuple[Any, ...]], ...],
-    first_dispatch_gate: Any,
+    stage: int,
+    command: ParallelCommand,
+    ack_required: bool,
+    stage_deadline: float,
     current_generation: Any,
     stop_event: Any,
     next_sequence: Callable[[], int],
     gc_was_enabled: bool,
 ) -> bool:
-    """Send already-prepared packets after their common dispatch gate."""
-
-    def build_packet(command_kind: str, payload: tuple[Any, ...]) -> bytes:
-        """Build one pre-resolved no-ACK command packet."""
-        packet_sequence = next_sequence()
-        if command_kind == "color":
-            packet = _set_color(source, packet_sequence, target, payload)
-        elif command_kind == "power":
-            packet = _set_power(source, packet_sequence, target, payload)
-        elif command_kind == "waveform_optional":
-            packet = _set_waveform_optional(source, packet_sequence, target, payload)
-        elif command_kind == "reboot":
-            packet = _set_reboot(source, packet_sequence, target)
-        elif command_kind == "multizone_effect":
-            packet = _set_multizone_effect(source, packet_sequence, target, payload)
-        elif command_kind == "tile_effect":
-            packet = _set_tile_effect(source, packet_sequence, target, payload)
-        else:
-            raise ValueError(f"unsupported command: {command_kind}")
-        return packet
-
+    """Send one staged packet after its request-scoped dispatch message."""
     try:
-        packets = tuple(build_packet(*spec) for spec in command_specs)
+        packet, sequence = _build_packet(
+            command, source, target, next_sequence, ack_required=ack_required
+        )
     except (TypeError, ValueError) as err:
-        pipe.send(("ERROR", request_id, str(err)))
+        pipe.send(("ERROR", request_id, stage, str(err)))
         return True
     if gc_was_enabled:
         gc.disable()
-    pipe.send(("READY", request_id))
-    first_dispatch_gate.acquire()
+    pipe.send(("READY", request_id, stage))
+    while True:
+        if stop_event.is_set() or current_generation.value != request_id:
+            pipe.send(("CANCELLED", request_id, stage))
+            if gc_was_enabled and not gc.isenabled():
+                gc.enable()
+            return True
+        if not pipe.poll(0.01):
+            continue
+        control = pipe.recv()
+        if control[:3] == ("CANCEL", request_id, stage):
+            pipe.send(("CANCELLED", request_id, stage))
+            if gc_was_enabled and not gc.isenabled():
+                gc.enable()
+            return True
+        if control[:3] != ("DISPATCH", request_id, stage):
+            continue
+        deadline_ns = control[3]
+        while (remaining := deadline_ns - time.monotonic_ns()) > 1_000_000:
+            if current_generation.value != request_id or pipe.poll(0):
+                break
+            time.sleep(remaining / 1_000_000_000)
+        if current_generation.value != request_id or pipe.poll(0):
+            continue
+        while time.monotonic_ns() < deadline_ns:
+            pass
+        break
     if stop_event.is_set() or current_generation.value != request_id:
-        pipe.send(("CANCELLED", request_id))
+        pipe.send(("CANCELLED", request_id, stage))
+        if gc_was_enabled and not gc.isenabled():
+            gc.enable()
+        return True
+    if ack_required and time.monotonic() >= stage_deadline:
+        pipe.send(("ACK_TIMEOUT", request_id, stage))
         if gc_was_enabled and not gc.isenabled():
             gc.enable()
         return True
     try:
-        for packet in packets:
-            _send_packet(udp, packet, "short UDP send")
-        pipe.send(("SENT", request_id))
+        _send_packet(udp, packet, "short UDP send")
     except (OSError, ValueError) as err:
-        pipe.send(("ERROR", request_id, str(err)))
+        pipe.send(("ERROR", request_id, stage, str(err)))
+    else:
+        if not ack_required:
+            pipe.send(("SENT", request_id, stage))
+        elif (ack := _wait_for_ack(
+            udp,
+            pipe,
+            source,
+            target,
+            sequence,
+            request_id,
+            stage,
+            current_generation,
+            stage_deadline,
+        )) is True:
+            pipe.send(("ACKED", request_id, stage))
+        elif ack is None:
+            pipe.send(("CANCELLED", request_id, stage))
+        else:
+            pipe.send(("ACK_TIMEOUT", request_id, stage))
     if gc_was_enabled and not gc.isenabled():
         gc.enable()
     return True
@@ -343,12 +529,11 @@ def _worker(
     host: str,
     source: int,
     pipe: Connection,
-    first_dispatch_gate: Any,
     current_generation: Any,
     stop_event: Any,
     port: int,
 ) -> None:
-    """Own a socket for one light and wait beside the dispatch gate."""
+    """Own a socket for one light and wait for request-scoped control messages."""
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     udp: socket.socket | None = None
     service_port = port
@@ -379,6 +564,10 @@ def _worker(
         while command := pipe.recv():
             if command[0] == "SHUTDOWN":
                 break
+            if command[0] == "CANCEL":
+                _kind, request_id, stage = command
+                pipe.send(("CANCELLED", request_id, stage))
+                continue
             if command[0] == "RECONNECT":
                 _kind, reconnect_host = command
                 try:
@@ -388,7 +577,9 @@ def _worker(
                 else:
                     pipe.send(("RECONNECTED",))
                 continue
-            _kind, request_id, command_specs = command
+            _kind, request_id, stage, staged_command, ack_required, stage_deadline = (
+                command
+            )
             assert udp is not None
             if not _dispatch_prepared(
                 udp,
@@ -396,8 +587,10 @@ def _worker(
                 target,
                 pipe,
                 request_id,
-                command_specs,
-                first_dispatch_gate,
+                stage,
+                staged_command,
+                ack_required,
+                stage_deadline,
                 current_generation,
                 stop_event,
                 next_sequence,
@@ -426,7 +619,6 @@ class LIFXParallelRuntime:
         self.hosts = tuple(hosts)
         self.port = port
         self._workers: list[_Worker] = []
-        self._dispatch_gate: Any = None
         self._stop_event: Any = None
         self._current_generation: Any = None
         self._context: Any = None
@@ -458,7 +650,6 @@ class LIFXParallelRuntime:
         if not self.hosts:
             raise HomeAssistantError("A parallel LIFX group needs at least one member")
         self._context = mp.get_context("spawn")
-        self._dispatch_gate = self._context.Semaphore(0)
         self._stop_event = self._context.Event()
         self._current_generation = self._context.Value("Q", 0)
         self._source = secrets.randbelow(0xFFFFFFFE) + 2
@@ -498,9 +689,6 @@ class LIFXParallelRuntime:
                 if worker.process.is_alive():
                     with suppress(BrokenPipeError, EOFError, OSError):
                         worker.pipe.send(("SHUTDOWN",))
-            if self._dispatch_gate is not None:
-                for _worker in self._workers:
-                    self._dispatch_gate.release()
             for worker in self._workers:
                 worker.process.join(timeout=1.0)
                 if worker.process.is_alive():
@@ -512,7 +700,6 @@ class LIFXParallelRuntime:
     def _spawn_worker(self, index: int, host: str) -> _Worker:
         """Start one worker in its fixed member slot."""
         assert self._context is not None
-        assert self._dispatch_gate is not None
         assert self._source is not None
         assert self._stop_event is not None
         parent, child = self._context.Pipe(duplex=True)
@@ -522,7 +709,6 @@ class LIFXParallelRuntime:
                 host,
                 self._source,
                 child,
-                self._dispatch_gate,
                 self._current_generation,
                 self._stop_event,
                 self.port,
@@ -555,11 +741,11 @@ class LIFXParallelRuntime:
         self,
         commands: tuple[ParallelCommand, ...],
     ) -> None:
-        """Release one no-ACK command per worker from the shared dispatch gate."""
+        """Dispatch the latest request, preempting any older staged request."""
         await self.hass.async_add_executor_job(self._queue_dispatch, commands)
 
     def _queue_dispatch(self, commands: tuple[ParallelCommand, ...]) -> None:
-        """Replace only work that has not reached the common gate."""
+        """Immediately supersede an active wait and replace unsent work."""
         if len(commands) != len(self._workers):
             raise HomeAssistantError("The LIFX Device Group transport is unavailable")
         with self._dispatch_condition:
@@ -580,7 +766,7 @@ class LIFXParallelRuntime:
             raise request.error
 
     def _dispatch_loop(self) -> None:
-        """Serialize pipe ownership while allowing queued work to be superseded."""
+        """Serialize pipe ownership while allowing active work to be superseded."""
         while True:
             with self._dispatch_condition:
                 while self._pending_dispatch is None and not self._dispatcher_stopping:
@@ -625,49 +811,179 @@ class LIFXParallelRuntime:
             raise HomeAssistantError("The LIFX Device Group transport is unavailable")
         with self._lock:
             self._replace_dead_workers()
-            try:
-                for worker, command in zip(self._workers, commands, strict=True):
-                    command_specs = [(command.kind, command.payload)]
-                    if command.second is not None:
-                        command_specs.append(
-                            (command.second.kind, command.second.payload)
+            stages = tuple(command.stages for command in commands)
+            stage_count = max(len(member_stages) for member_stages in stages)
+            for stage in range(stage_count):
+                targets = tuple(
+                    (worker, member_stages[stage])
+                    for worker, member_stages in zip(self._workers, stages, strict=True)
+                    if stage < len(member_stages)
+                )
+                ack_required = stage + 1 < stage_count
+                try:
+                    if not ack_required:
+                        self._dispatch_stage(request_id, stage, targets, False, None)
+                        return
+                    unresolved = targets
+                    stage_deadline = time.monotonic() + 15.0
+                    for attempt in range(5):
+                        unresolved = self._dispatch_stage(
+                            request_id, stage, unresolved, True, stage_deadline
                         )
-                    worker.pipe.send(("PREPARE", request_id, tuple(command_specs)))
-                self._collect("READY", 0.25, request_id)
-            except (BrokenPipeError, EOFError, HomeAssistantError, OSError) as err:
-                for _worker in self._workers:
-                    self._dispatch_gate.release()
-                raise _ParallelPreparationError(str(err)) from err
+                        if not unresolved:
+                            break
+                        if attempt == 4 or time.monotonic() >= stage_deadline:
+                            raise _ParallelAckTimeout(
+                                "Timed out waiting for LIFX Device Group acknowledgements"
+                            )
+                except _ParallelPreempted:
+                    self._cancel_stage(request_id, stage, targets)
+                    raise
 
+    def _dispatch_stage(
+        self,
+        request_id: int,
+        stage: int,
+        targets: tuple[tuple[_Worker, ParallelCommand], ...],
+        ack_required: bool,
+        stage_deadline: float | None,
+    ) -> tuple[tuple[_Worker, ParallelCommand], ...]:
+        """Dispatch one stage and return members that require an ACK retry."""
+        if self._current_generation.value != request_id:
+            raise _ParallelPreempted("LIFX Device Group command superseded")
+        if (
+            ack_required
+            and stage_deadline is not None
+            and time.monotonic() >= stage_deadline
+        ):
+            return targets
+        pending = {worker.pipe: (worker, command) for worker, command in targets}
+        try:
+            for worker, command in targets:
+                worker.pipe.send(
+                    (
+                        "PREPARE",
+                        request_id,
+                        stage,
+                        command,
+                        ack_required,
+                        stage_deadline if stage_deadline is not None else 0.0,
+                    )
+                )
+            prepare_timeout = (
+                min(0.25, stage_deadline - time.monotonic())
+                if stage_deadline is not None
+                else 0.25
+            )
+            if prepare_timeout <= 0:
+                self._cancel_stage(request_id, stage, targets)
+                return targets
+            self._collect_selected(
+                {pipe: worker for pipe, (worker, _command) in pending.items()},
+                "READY",
+                prepare_timeout,
+                request_id,
+            )
+        except (BrokenPipeError, EOFError, HomeAssistantError, OSError) as err:
+            self._cancel_stage(request_id, stage, targets)
+            raise _ParallelPreparationError(str(err)) from err
+        if self._current_generation.value != request_id:
+            raise _ParallelPreempted("LIFX Device Group command superseded")
+        try:
+            self._dispatch_at_deadline(
+                request_id, stage, (worker for worker, _command in targets)
+            )
+        except (BrokenPipeError, EOFError, OSError) as err:
+            self._cancel_stage(request_id, stage, targets)
+            raise _ParallelPreparationError(str(err)) from err
+        if not ack_required:
+            self._collect_selected(
+                {pipe: worker for pipe, (worker, _command) in pending.items()},
+                "SENT",
+                1.0,
+                request_id,
+            )
+            return ()
+        assert stage_deadline is not None
+        return self._collect_stage_acks(request_id, stage, pending, stage_deadline)
+
+    def _collect_stage_acks(
+        self,
+        request_id: int,
+        stage: int,
+        pending: dict[Connection, tuple[_Worker, ParallelCommand]],
+        stage_deadline: float,
+    ) -> tuple[tuple[_Worker, ParallelCommand], ...]:
+        """Collect one ACK outcome per worker without treating a timeout as fatal."""
+        pending = pending.copy()
+        unresolved: list[tuple[_Worker, ParallelCommand]] = []
+        deadline = min(time.monotonic() + 3.05, stage_deadline)
+        while pending:
             if self._current_generation.value != request_id:
-                for _worker in self._workers:
-                    self._dispatch_gate.release()
-                return
-
-            self._dispatch_at_deadline(self._dispatch_gate, self._workers)
-            try:
-                self._collect("SENT", 1.0, request_id)
-            except HomeAssistantError:
-                # A UDP failure is command-local; re-probe living workers before
-                # a later request without exposing it as group availability.
-                for worker in self._workers:
-                    if worker.process.is_alive():
-                        with suppress(BrokenPipeError, EOFError, OSError):
-                            worker.pipe.send(("RECONNECT", worker.host))
-                with suppress(HomeAssistantError):
-                    self._collect("RECONNECTED", 1.5)
-                raise
+                raise _ParallelPreempted("LIFX Device Group command superseded")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                unresolved.extend(pending.values())
+                break
+            ready = wait(tuple(pending), timeout=min(0.05, remaining))
+            if not ready:
+                if any(not worker.process.is_alive() for worker, _command in pending.values()):
+                    raise HomeAssistantError("A LIFX parallel worker exited")
+                continue
+            for pipe in ready:
+                worker, command = pending[pipe]
+                try:
+                    message = pipe.recv()
+                except EOFError as err:
+                    raise HomeAssistantError(
+                        f"LIFX worker for {worker.host} closed unexpectedly"
+                    ) from err
+                if len(message) < 3 or message[1] != request_id or message[2] != stage:
+                    continue
+                pending.pop(pipe)
+                if message[0] == "ACKED":
+                    continue
+                if message[0] == "CANCELLED":
+                    raise _ParallelPreempted("LIFX Device Group command superseded")
+                unresolved.append((worker, command))
+        return tuple(unresolved)
 
     @staticmethod
-    def _dispatch_at_deadline(dispatch_gate: Any, workers: Iterable[_Worker]) -> None:
-        """Release one pre-created worker gate at one absolute deadline."""
+    def _dispatch_at_deadline(
+        request_id: int, stage: int, workers: Iterable[_Worker]
+    ) -> None:
+        """Send each ready worker one request-scoped common deadline."""
         deadline = time.monotonic_ns() + 5_000_000
-        while (remaining := deadline - time.monotonic_ns()) > 1_000_000:
-            time.sleep(remaining / 1_000_000_000)
-        while time.monotonic_ns() < deadline:
-            pass
-        for _worker in workers:
-            dispatch_gate.release()
+        for worker in workers:
+            worker.pipe.send(("DISPATCH", request_id, stage, deadline))
+
+    def _cancel_stage(
+        self,
+        request_id: int,
+        stage: int,
+        targets: tuple[tuple[_Worker, ParallelCommand], ...],
+    ) -> None:
+        """Cancel a stage and wait until every worker has returned to idle."""
+        pending = {worker.pipe: worker for worker, _command in targets}
+        for worker in pending.values():
+            with suppress(BrokenPipeError, EOFError, OSError):
+                worker.pipe.send(("CANCEL", request_id, stage))
+        deadline = time.monotonic() + 1.0
+        while pending:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise HomeAssistantError("Timed out cancelling LIFX Device Group command")
+            ready = wait(tuple(pending), timeout=min(0.01, remaining))
+            for pipe in ready:
+                worker = pending[pipe]
+                try:
+                    message = pipe.recv()
+                except EOFError as err:
+                    raise HomeAssistantError(
+                        f"LIFX worker for {worker.host} closed unexpectedly"
+                    ) from err
+                if message[:3] == ("CANCELLED", request_id, stage):
+                    pending.pop(pipe)
 
     def _collect(
         self,

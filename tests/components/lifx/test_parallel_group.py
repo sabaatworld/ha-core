@@ -13,6 +13,7 @@ from homeassistant.components.lifx.parallel_group import (
     _members_are_ready,
     async_setup_parallel_group_entry,
 )
+from homeassistant.components.lifx.manager import SERVICE_EFFECT_MOVE
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
@@ -212,3 +213,69 @@ async def test_latest_projection_wins_after_a_newer_group_request(
     await runtime._async_dispatch_projected_states(commands, off_states)
 
     assert runtime.display_state.is_on is False
+
+
+async def test_turning_on_an_off_member_with_color_uses_staged_commands(
+    hass: HomeAssistant,
+) -> None:
+    """An off member must acknowledge its hidden color before power is sent."""
+    runtime, members = _runtime(hass)
+    members[0].device.power_level = 0
+    members[1].device.power_level = 0
+
+    await runtime.async_set_state(power=True, brightness=255)
+
+    commands = runtime.parallel.async_dispatch.await_args.args[0]
+    assert all(command.kind == "color" for command in commands)
+    assert all(command.second is not None for command in commands)
+    assert all(command.second.kind == "power" for command in commands)
+
+
+async def test_paint_theme_stages_power_before_color(
+    hass: HomeAssistant,
+) -> None:
+    """Theme application must not dispatch power and color independently."""
+    runtime, _members = _runtime(hass)
+
+    await runtime._async_paint_theme(
+        power_on=True,
+        palette=[(0, 100, 100, 3500)],
+        transition=0,
+    )
+
+    runtime.parallel.async_dispatch.assert_awaited_once()
+    commands = runtime.parallel.async_dispatch.await_args.args[0]
+    assert all(command.kind == "power" for command in commands)
+    assert all(command.second is not None for command in commands)
+    assert all(command.second.kind == "color" for command in commands)
+
+
+async def test_turning_off_with_a_transition_stages_power_before_color(
+    hass: HomeAssistant,
+) -> None:
+    """An already-off member must power first before its final color is sent."""
+    runtime, members = _runtime(hass)
+    for member in members:
+        member.device.power_level = 0
+
+    await runtime.async_set_state(power=False, brightness=255, transition=1)
+
+    commands = runtime.parallel.async_dispatch.await_args.args[0]
+    assert all(command.kind == "power" for command in commands)
+    assert all(command.second is not None for command in commands)
+    assert all(command.second.kind == "color" for command in commands)
+
+
+async def test_move_effect_stages_power_before_effect(
+    hass: HomeAssistant,
+) -> None:
+    """Effect activation must not use a separate uncoordinated power request."""
+    runtime, _members = _runtime(hass)
+
+    await runtime.async_start_effect(SERVICE_EFFECT_MOVE, power_on=True)
+
+    runtime.parallel.async_dispatch.assert_awaited_once()
+    commands = runtime.parallel.async_dispatch.await_args.args[0]
+    assert all(command.kind == "power" for command in commands)
+    assert all(command.second is not None for command in commands)
+    assert all(command.second.kind == "multizone_effect" for command in commands)

@@ -1,5 +1,7 @@
 # LIFX Device Group No-ACK Implementation Plan
 
+> **Superseded 2026-07-19:** Use `2026-07-19-lifx-device-group-staged-ack-preemption.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make LIFX Device Groups send low-skew commands through permanent warmed workers without ACK waits, while physical lights alone determine group availability and ordinary polling remains the actual-state source.

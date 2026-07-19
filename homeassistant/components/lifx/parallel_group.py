@@ -455,38 +455,45 @@ class LIFXParallelGroupRuntime:
             self._clear_projection(generation)
             raise
 
+    def _with_power_stage(
+        self, commands: tuple[ParallelCommand, ...], kwargs: dict[str, Any]
+    ) -> tuple[ParallelCommand, ...]:
+        """Precede dependent commands with an acknowledged power-on stage."""
+        if not kwargs.get(ATTR_POWER_ON, True):
+            return commands
+        return tuple(
+            ParallelCommand(
+                "power",
+                (True, self._transition_ms(member, True, kwargs)),
+                command,
+            )
+            for member, command in zip(self.members, commands, strict=True)
+        )
+
     async def async_identify(self) -> None:
         """Start the LIFX identify waveform from every worker gate."""
-        async with self._command_lock:
-            self._raise_if_recovering()
-            commands = tuple(
-                ParallelCommand(
-                    "waveform_optional",
-                    (1, 0, 0, 1, 3500, 1000, 3.0, 0, 1, 1, 1, 1, 1),
-                )
-                for _member in self.members
+        self._raise_if_recovering()
+        commands = tuple(
+            ParallelCommand(
+                "waveform_optional",
+                (1, 0, 0, 1, 3500, 1000, 3.0, 0, 1, 1, 1, 1, 1),
             )
-            await self.parallel.async_dispatch(commands)
+            for _member in self.members
+        )
+        await self.parallel.async_dispatch(commands)
 
     async def async_restart(self) -> None:
         """Reboot every member from the shared dispatch gate."""
-        async with self._command_lock:
-            self._raise_if_recovering()
-            await self.parallel.async_dispatch(
-                tuple(ParallelCommand("reboot", ()) for _member in self.members)
-            )
+        self._raise_if_recovering()
+        await self.parallel.async_dispatch(
+            tuple(ParallelCommand("reboot", ()) for _member in self.members)
+        )
 
     async def async_start_effect(self, service: str, **kwargs: Any) -> None:
         """Apply an effect without falling back to member aiolifx connections."""
+        self._raise_if_recovering()
         async with self._command_lock:
-            self._raise_if_recovering()
             await self._async_stop_software_effect()
-            if service == SERVICE_EFFECT_STOP:
-                await self._async_stop_firmware_effects()
-                return
-            if service == SERVICE_PAINT_THEME:
-                await self._async_paint_theme(**kwargs)
-                return
             if service == SERVICE_EFFECT_PULSE:
                 self._software_effect = self.hass.async_create_background_task(
                     self._async_pulse(**kwargs),
@@ -499,10 +506,15 @@ class LIFXParallelGroupRuntime:
                     f"lifx-parallel-colorloop-{self.group_id}",
                 )
                 return
-            if kwargs.get(ATTR_POWER_ON, True):
-                await self._async_set_state(power=True)
-            if service == SERVICE_EFFECT_MOVE:
-                await self.parallel.async_dispatch(
+        if service == SERVICE_EFFECT_STOP:
+            await self._async_stop_firmware_effects()
+            return
+        if service == SERVICE_PAINT_THEME:
+            await self._async_paint_theme(**kwargs)
+            return
+        if service == SERVICE_EFFECT_MOVE:
+            await self.parallel.async_dispatch(
+                self._with_power_stage(
                     tuple(
                         ParallelCommand(
                             "multizone_effect",
@@ -521,30 +533,33 @@ class LIFXParallelGroupRuntime:
                             ),
                         )
                         for _member in self.members
-                    )
+                    ),
+                    kwargs,
                 )
-                return
-            effect, speed, sky_type, saturation_min, saturation_max = {
-                SERVICE_EFFECT_FLAME: (3, EFFECT_FLAME_DEFAULT_SPEED, 0, 0, 0),
-                SERVICE_EFFECT_MORPH: (2, EFFECT_MORPH_DEFAULT_SPEED, 0, 0, 0),
-                SERVICE_EFFECT_SKY: (
-                    5,
-                    EFFECT_SKY_DEFAULT_SPEED,
-                    {"Sunrise": 0, "Sunset": 1, "Clouds": 2}[
-                        kwargs.get(ATTR_SKY_TYPE, EFFECT_SKY_DEFAULT_SKY_TYPE)
-                    ],
-                    kwargs.get(
-                        "cloud_saturation_min",
-                        EFFECT_SKY_DEFAULT_CLOUD_SATURATION_MIN,
-                    ),
-                    kwargs.get(
-                        "cloud_saturation_max",
-                        EFFECT_SKY_DEFAULT_CLOUD_SATURATION_MAX,
-                    ),
+            )
+            return
+        effect, speed, sky_type, saturation_min, saturation_max = {
+            SERVICE_EFFECT_FLAME: (3, EFFECT_FLAME_DEFAULT_SPEED, 0, 0, 0),
+            SERVICE_EFFECT_MORPH: (2, EFFECT_MORPH_DEFAULT_SPEED, 0, 0, 0),
+            SERVICE_EFFECT_SKY: (
+                5,
+                EFFECT_SKY_DEFAULT_SPEED,
+                {"Sunrise": 0, "Sunset": 1, "Clouds": 2}[
+                    kwargs.get(ATTR_SKY_TYPE, EFFECT_SKY_DEFAULT_SKY_TYPE)
+                ],
+                kwargs.get(
+                    "cloud_saturation_min",
+                    EFFECT_SKY_DEFAULT_CLOUD_SATURATION_MIN,
                 ),
-            }[service]
-            palette = self._theme_colors(**kwargs)
-            await self.parallel.async_dispatch(
+                kwargs.get(
+                    "cloud_saturation_max",
+                    EFFECT_SKY_DEFAULT_CLOUD_SATURATION_MAX,
+                ),
+            ),
+        }[service]
+        palette = self._theme_colors(**kwargs)
+        await self.parallel.async_dispatch(
+            self._with_power_stage(
                 tuple(
                     ParallelCommand(
                         "tile_effect",
@@ -558,8 +573,10 @@ class LIFXParallelGroupRuntime:
                         ),
                     )
                     for _member in self.members
-                )
+                ),
+                kwargs,
             )
+        )
 
     async def _async_stop_software_effect(self) -> None:
         """Cancel the prior software effect before changing group state."""
@@ -593,8 +610,6 @@ class LIFXParallelGroupRuntime:
 
     async def _async_paint_theme(self, **kwargs: Any) -> None:
         """Paint one theme color per member at one common deadline."""
-        if kwargs.get(ATTR_POWER_ON, True):
-            await self._async_set_state(power=True)
         palette = self._theme_colors(**kwargs)
         duration = round(
             kwargs.get(ATTR_TRANSITION, PAINT_THEME_DEFAULT_TRANSITION) * 1000
@@ -606,10 +621,12 @@ class LIFXParallelGroupRuntime:
             )
             for index, member in enumerate(self.members)
         )
+        commands = tuple(
+            ParallelCommand("color", (*state.color, duration)) for state in states
+        )
+        commands = self._with_power_stage(commands, kwargs)
         await self._async_dispatch_projected_states(
-            tuple(
-                ParallelCommand("color", (*state.color, duration)) for state in states
-            ),
+            commands,
             states,
         )
 
@@ -618,8 +635,6 @@ class LIFXParallelGroupRuntime:
         hsbk = find_hsbk(self.hass, **kwargs)
         period = kwargs.get(ATTR_PERIOD, 1.0)
         cycles = kwargs.get(ATTR_CYCLES, 1)
-        if kwargs.get(ATTR_POWER_ON, True):
-            await self.async_set_state(power=True)
         for _cycle in range(round(cycles)):
             if hsbk is None:
                 await self.async_set_state(power=True, brightness=255)
@@ -634,8 +649,6 @@ class LIFXParallelGroupRuntime:
 
     async def _async_colorloop(self, **kwargs: Any) -> None:
         """Run colorloop ticks through the same warmed worker dispatcher."""
-        if kwargs.get(ATTR_POWER_ON, True):
-            await self.async_set_state(power=True)
         period = kwargs.get(ATTR_PERIOD, 60)
         change = kwargs.get(ATTR_CHANGE, 20)
         spread = kwargs.get(ATTR_SPREAD, 30)
@@ -656,20 +669,24 @@ class LIFXParallelGroupRuntime:
                 level = (
                     member.device.color[2] if brightness is None else brightness * 257
                 )
-                commands.append(
-                    ParallelCommand(
-                        "color",
-                        (
-                            round(hue / 360 * 65535),
-                            round(saturation / 100 * 65535),
-                            level,
-                            member.device.color[3],
-                            round(transition * 1000),
-                        ),
-                    )
+                command = ParallelCommand(
+                    "color",
+                    (
+                        round(hue / 360 * 65535),
+                        round(saturation / 100 * 65535),
+                        level,
+                        member.device.color[3],
+                        round(transition * 1000),
+                    ),
                 )
-            async with self._command_lock:
-                await self.parallel.async_dispatch(tuple(commands))
+                if kwargs.get(ATTR_POWER_ON, True) and tick == 0:
+                    command = ParallelCommand(
+                        "power",
+                        (True, self._transition_ms(member, True, kwargs)),
+                        command,
+                    )
+                commands.append(command)
+            await self.parallel.async_dispatch(tuple(commands))
             tick += 1
             await asyncio.sleep(period)
 
