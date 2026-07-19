@@ -250,8 +250,8 @@ class LIFXLight(LIFXEntity, LightEntity):
 
         if not self.is_on:
             if power_off:
-                if has_transition or fade:
-                    await self.set_power(False, duration=fade)
+                if has_transition:
+                    await self.set_power(False, duration=0)
                 else:
                     await self.set_power(False)
             # If fading on with color, set color immediately

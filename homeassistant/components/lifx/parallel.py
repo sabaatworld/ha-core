@@ -28,10 +28,7 @@ HEADER_SIZE = HEADER.size
 
 GET_SERVICE = 2
 STATE_SERVICE = 3
-GET_COLOR = 101
 SET_COLOR = 102
-LIGHT_STATE = 107
-ACKNOWLEDGEMENT = 45
 SET_POWER = 117
 SET_WAVEFORM_OPTIONAL = 119
 SET_REBOOT = 38
@@ -52,20 +49,21 @@ class ParallelCommand:
     second: ParallelCommand | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class ParallelLightState:
-    """A device-confirmed state returned by a parallel worker."""
-
-    color: tuple[int, int, int, int]
-    power_level: int
-    label: str
-
-
 @dataclass(slots=True)
 class _Worker:
     host: str
     process: Any
     pipe: Connection
+
+
+@dataclass(slots=True)
+class _DispatchRequest:
+    """One supersedable request owned by the dispatcher thread."""
+
+    request_id: int
+    commands: tuple[ParallelCommand, ...]
+    done: threading.Event
+    error: HomeAssistantError | None = None
 
 
 def _header(
@@ -98,17 +96,13 @@ def _get_service(source: int, sequence: int) -> bytes:
     return _header(GET_SERVICE, source, sequence, bytes(8), 0, tagged=True)
 
 
-def _get_color(source: int, sequence: int, target: bytes) -> bytes:
-    return _header(GET_COLOR, source, sequence, target, 0)
-
-
 def _set_color(
     source: int, sequence: int, target: bytes, payload: tuple[Any, ...]
 ) -> bytes:
     hue, saturation, brightness, kelvin, duration = payload
     body = COLOR_PAYLOAD.pack(0, hue, saturation, brightness, kelvin, duration)
     return (
-        _header(SET_COLOR, source, sequence, target, len(body), ack_required=True)
+        _header(SET_COLOR, source, sequence, target, len(body))
         + body
     )
 
@@ -119,7 +113,7 @@ def _set_power(
     power, duration = payload
     body = POWER_PAYLOAD.pack(65535 if power else 0, duration)
     return (
-        _header(SET_POWER, source, sequence, target, len(body), ack_required=True)
+        _header(SET_POWER, source, sequence, target, len(body))
         + body
     )
 
@@ -165,14 +159,13 @@ def _set_waveform_optional(
             sequence,
             target,
             len(body),
-            ack_required=True,
         )
         + body
     )
 
 
 def _set_reboot(source: int, sequence: int, target: bytes) -> bytes:
-    return _header(SET_REBOOT, source, sequence, target, 0, ack_required=True)
+    return _header(SET_REBOOT, source, sequence, target, 0)
 
 
 def _set_multizone_effect(
@@ -191,7 +184,6 @@ def _set_multizone_effect(
             sequence,
             target,
             len(body),
-            ack_required=True,
         )
         + body
     )
@@ -238,7 +230,6 @@ def _set_tile_effect(
             sequence,
             target,
             len(body),
-            ack_required=True,
         )
         + body
     )
@@ -261,111 +252,32 @@ def _parse_header(data: bytes) -> tuple[int, int, bytes, int]:
     return source, sequence, target, packet_type
 
 
-def _parse_light_state(data: bytes) -> ParallelLightState:
-    """Parse a LightState response into coordinator cache fields."""
-    if len(data) != HEADER_SIZE + 52:
-        raise ValueError("LIFX LightState has an invalid size")
-    hue, saturation, brightness, kelvin, _reserved, power, label, _reserved2 = (
-        struct.unpack_from("<HHHHhH32sQ", data, HEADER_SIZE)
-    )
-    return ParallelLightState(
-        (hue, saturation, brightness, kelvin),
-        power,
-        label.split(b"\0", 1)[0].decode(errors="replace"),
-    )
-
-
-def _wait_for_packet(
-    udp: socket.socket,
-    source: int,
-    sequence: int,
-    target: bytes,
-    packet_type: int,
-    timeout: float,
-) -> bytes:
-    """Read until the matching response arrives or the deadline expires."""
-    deadline = time.monotonic() + timeout
-    while (remaining := deadline - time.monotonic()) > 0:
-        udp.settimeout(remaining)
-        data = udp.recv(2048)
-        response_source, response_sequence, response_target, response_type = (
-            _parse_header(data)
-        )
-        if (
-            response_source == source
-            and response_sequence == sequence
-            and response_target == target
-            and response_type == packet_type
-        ):
-            return data
-    raise TimeoutError("Timed out waiting for LIFX response")
-
-
 def _preflight(udp: socket.socket, source: int, next_sequence: Any) -> bytes:
     """Resolve the target and prove the member can answer before dispatching."""
     sequence = next_sequence()
     udp.send(_get_service(source, sequence))
-    udp.settimeout(1.0)
-    while True:
-        data = udp.recv(2048)
-        response_source, response_sequence, target, packet_type = _parse_header(data)
+    deadline = time.monotonic() + 1.0
+    while (remaining := deadline - time.monotonic()) > 0:
+        udp.settimeout(remaining)
+        try:
+            data = udp.recv(2048)
+            response_source, response_sequence, target, packet_type = _parse_header(data)
+        except (struct.error, ValueError):
+            continue
         if (
             response_source == source
             and response_sequence == sequence
             and packet_type == STATE_SERVICE
             and len(data) == HEADER_SIZE + 5
         ):
-            _service, port = struct.unpack_from("<BI", data, HEADER_SIZE)
+            try:
+                _service, port = struct.unpack_from("<BI", data, HEADER_SIZE)
+            except struct.error:
+                continue
             if not 1 <= port <= 65535:
                 raise ValueError("LIFX member reported an invalid UDP port")
             return target, port
-
-
-def _handle_stage(
-    udp: socket.socket,
-    source: int,
-    target: bytes,
-    pipe: Connection,
-    request_id: int,
-    payload: tuple[Any, ...],
-    next_sequence: Callable[[], int],
-) -> None:
-    """Send one non-gated color staging command and receive its ACK."""
-    packet_sequence = next_sequence()
-    packet = _set_color(source, packet_sequence, target, payload)
-    try:
-        _send_packet(udp, packet, "short UDP staging send")
-        _wait_for_packet(udp, source, packet_sequence, target, ACKNOWLEDGEMENT, 1.0)
-    except (OSError, TimeoutError, ValueError) as err:
-        pipe.send(("ERROR", request_id, str(err)))
-    else:
-        pipe.send(("STAGED", request_id))
-
-
-def _handle_query_state(
-    udp: socket.socket,
-    source: int,
-    target: bytes,
-    pipe: Connection,
-    request_id: int,
-    next_sequence: Callable[[], int],
-) -> None:
-    """Fetch device state through the worker-owned socket."""
-    query_sequence = next_sequence()
-    try:
-        _send_packet(
-            udp,
-            _get_color(source, query_sequence, target),
-            "LIFX state query send",
-        )
-        response = _wait_for_packet(
-            udp, source, query_sequence, target, LIGHT_STATE, 1.0
-        )
-        state = _parse_light_state(response)
-    except (OSError, TimeoutError, ValueError) as err:
-        pipe.send(("ERROR", request_id, str(err)))
-    else:
-        pipe.send(("STATE", request_id, state))
+    raise TimeoutError("Timed out waiting for LIFX service response")
 
 
 def _dispatch_prepared(
@@ -376,15 +288,15 @@ def _dispatch_prepared(
     request_id: int,
     command_specs: tuple[tuple[str, tuple[Any, ...]], ...],
     first_dispatch_gate: Any,
-    second_dispatch_gate: Any,
+    current_generation: Any,
     stop_event: Any,
     next_sequence: Callable[[], int],
     gc_was_enabled: bool,
 ) -> bool:
-    """Send one or two prebuilt command phases and return whether to continue."""
+    """Send already-prepared packets after their common dispatch gate."""
 
-    def build_packet(command_kind: str, payload: tuple[Any, ...]) -> tuple[bytes, int]:
-        """Build one pre-resolved command packet and its ACK sequence."""
+    def build_packet(command_kind: str, payload: tuple[Any, ...]) -> bytes:
+        """Build one pre-resolved no-ACK command packet."""
         packet_sequence = next_sequence()
         if command_kind == "color":
             packet = _set_color(source, packet_sequence, target, payload)
@@ -400,7 +312,7 @@ def _dispatch_prepared(
             packet = _set_tile_effect(source, packet_sequence, target, payload)
         else:
             raise ValueError(f"unsupported command: {command_kind}")
-        return packet, packet_sequence
+        return packet
 
     try:
         packets = tuple(build_packet(*spec) for spec in command_specs)
@@ -411,45 +323,17 @@ def _dispatch_prepared(
         gc.disable()
     pipe.send(("READY", request_id))
     first_dispatch_gate.acquire()
-    if stop_event.is_set():
-        pipe.send(("ABORTED", request_id))
+    if stop_event.is_set() or current_generation.value != request_id:
+        pipe.send(("CANCELLED", request_id))
         if gc_was_enabled and not gc.isenabled():
             gc.enable()
         return True
     try:
-        packet, packet_sequence = packets[0]
-        _send_packet(udp, packet, "short UDP send")
-        _wait_for_packet(udp, source, packet_sequence, target, ACKNOWLEDGEMENT, 1.0)
-        pipe.send(("ACK", request_id, 0))
-    except (OSError, TimeoutError, ValueError) as err:
+        for packet in packets:
+            _send_packet(udp, packet, "short UDP send")
+        pipe.send(("SENT", request_id))
+    except (OSError, ValueError) as err:
         pipe.send(("ERROR", request_id, str(err)))
-    if len(packets) == 1:
-        if gc_was_enabled and not gc.isenabled():
-            gc.enable()
-        return True
-
-    second_command = pipe.recv()
-    if second_command[0] == "SHUTDOWN":
-        return False
-    if second_command[0] == "ABORT_SECOND":
-        pipe.send(("ABORTED", request_id, 1))
-    elif second_command != ("DISPATCH_SECOND", request_id):
-        pipe.send(("ERROR", request_id, "invalid second phase command"))
-    else:
-        pipe.send(("READY_SECOND", request_id))
-        second_dispatch_gate.acquire()
-        if stop_event.is_set():
-            pipe.send(("ABORTED", request_id, 1))
-        else:
-            try:
-                packet, packet_sequence = packets[1]
-                _send_packet(udp, packet, "short UDP send")
-                _wait_for_packet(
-                    udp, source, packet_sequence, target, ACKNOWLEDGEMENT, 1.0
-                )
-                pipe.send(("ACK", request_id, 1))
-            except (OSError, TimeoutError, ValueError) as err:
-                pipe.send(("ERROR", request_id, str(err)))
     if gc_was_enabled and not gc.isenabled():
         gc.enable()
     return True
@@ -460,12 +344,14 @@ def _worker(
     source: int,
     pipe: Connection,
     first_dispatch_gate: Any,
-    second_dispatch_gate: Any,
+    current_generation: Any,
     stop_event: Any,
+    port: int,
 ) -> None:
     """Own a socket for one light and wait beside the dispatch gate."""
     signal.signal(signal.SIGINT, signal.SIG_IGN)
-    udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp: socket.socket | None = None
+    service_port = port
     sequence = 0
     gc_was_enabled = gc.isenabled()
 
@@ -475,42 +361,35 @@ def _worker(
         sequence = (sequence + 1) & 0xFF
         return value
 
+    def reconnect(new_host: str) -> bytes:
+        """Replace only this worker's UDP socket and resolve its target."""
+        nonlocal udp
+        if udp is not None:
+            udp.close()
+        udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        udp.connect((new_host, service_port))
+        target, member_port = _preflight(udp, source, next_sequence)
+        udp.connect((new_host, member_port))
+        return target
+
     try:
-        udp.connect((host, DEFAULT_PORT))
-        target, port = _preflight(udp, source, next_sequence)
-        udp.connect((host, port))
-        query_sequence = next_sequence()
-        udp.send(_get_color(source, query_sequence, target))
-        udp.settimeout(1.0)
-        while True:
-            data = udp.recv(2048)
-            response_source, response_sequence, _target, packet_type = _parse_header(
-                data
-            )
-            if (
-                response_source == source
-                and response_sequence == query_sequence
-                and packet_type == LIGHT_STATE
-            ):
-                break
+        target = reconnect(host)
         pipe.send(("PREFLIGHT_OK",))
 
         while command := pipe.recv():
             if command[0] == "SHUTDOWN":
                 break
-            if command[0] == "STAGE":
-                _kind, request_id, payload = command
-                _handle_stage(
-                    udp, source, target, pipe, request_id, payload, next_sequence
-                )
-                continue
-            if command[0] == "QUERY_STATE":
-                _kind, request_id = command
-                _handle_query_state(
-                    udp, source, target, pipe, request_id, next_sequence
-                )
+            if command[0] == "RECONNECT":
+                _kind, reconnect_host = command
+                try:
+                    target = reconnect(reconnect_host)
+                except (OSError, TimeoutError, ValueError, struct.error) as err:
+                    pipe.send(("RECONNECT_ERROR", str(err)))
+                else:
+                    pipe.send(("RECONNECTED",))
                 continue
             _kind, request_id, command_specs = command
+            assert udp is not None
             if not _dispatch_prepared(
                 udp,
                 source,
@@ -519,7 +398,7 @@ def _worker(
                 request_id,
                 command_specs,
                 first_dispatch_gate,
-                second_dispatch_gate,
+                current_generation,
                 stop_event,
                 next_sequence,
                 gc_was_enabled,
@@ -531,22 +410,33 @@ def _worker(
     finally:
         if gc_was_enabled and not gc.isenabled():
             gc.enable()
-        udp.close()
+        if udp is not None:
+            udp.close()
         pipe.close()
 
 
 class LIFXParallelRuntime:
     """A warmed, process-isolated LIFX dispatcher for one virtual group."""
 
-    def __init__(self, hass: HomeAssistant, hosts: Iterable[str]) -> None:
+    def __init__(
+        self, hass: HomeAssistant, hosts: Iterable[str], *, port: int = DEFAULT_PORT
+    ) -> None:
         """Initialize the process supervisor."""
         self.hass = hass
         self.hosts = tuple(hosts)
+        self.port = port
         self._workers: list[_Worker] = []
-        self._dispatch_gates: tuple[Any, Any] | None = None
+        self._dispatch_gate: Any = None
         self._stop_event: Any = None
+        self._current_generation: Any = None
+        self._context: Any = None
+        self._source: int | None = None
         self._request_id = 0
         self._lock = threading.Lock()
+        self._dispatch_condition = threading.Condition()
+        self._pending_dispatch: _DispatchRequest | None = None
+        self._dispatcher_stopping = False
+        self._dispatcher: threading.Thread | None = None
 
     @property
     def available(self) -> bool:
@@ -567,28 +457,21 @@ class LIFXParallelRuntime:
     def _start(self) -> None:
         if not self.hosts:
             raise HomeAssistantError("A parallel LIFX group needs at least one member")
-        context = mp.get_context("spawn")
-        self._dispatch_gates = (context.Semaphore(0), context.Semaphore(0))
-        self._stop_event = context.Event()
-        source = secrets.randbelow(0xFFFFFFFE) + 2
+        self._context = mp.get_context("spawn")
+        self._dispatch_gate = self._context.Semaphore(0)
+        self._stop_event = self._context.Event()
+        self._current_generation = self._context.Value("Q", 0)
+        self._source = secrets.randbelow(0xFFFFFFFE) + 2
         try:
-            for host in self.hosts:
-                parent, child = context.Pipe(duplex=True)
-                process = context.Process(
-                    target=_worker,
-                    args=(
-                        host,
-                        source,
-                        child,
-                        *self._dispatch_gates,
-                        self._stop_event,
-                    ),
-                    name=f"lifx-parallel-{host}",
-                )
-                process.start()
-                child.close()
-                self._workers.append(_Worker(host, process, parent))
+            for index, host in enumerate(self.hosts):
+                self._workers.append(self._spawn_worker(index, host))
             self._collect("PREFLIGHT_OK", 5.0)
+            self._dispatcher = threading.Thread(
+                target=self._dispatch_loop,
+                name="lifx-parallel-dispatcher",
+                daemon=True,
+            )
+            self._dispatcher.start()
         except Exception:
             self._stop()
             raise
@@ -598,6 +481,16 @@ class LIFXParallelRuntime:
         await self.hass.async_add_executor_job(self._stop)
 
     def _stop(self) -> None:
+        with self._dispatch_condition:
+            self._dispatcher_stopping = True
+            if self._pending_dispatch is not None:
+                self._pending_dispatch.error = HomeAssistantError("Dispatcher stopped")
+                self._pending_dispatch.done.set()
+                self._pending_dispatch = None
+            self._dispatch_condition.notify_all()
+        if self._dispatcher is not None:
+            self._dispatcher.join(timeout=1.0)
+            self._dispatcher = None
         with self._lock:
             if self._stop_event is not None:
                 self._stop_event.set()
@@ -605,10 +498,9 @@ class LIFXParallelRuntime:
                 if worker.process.is_alive():
                     with suppress(BrokenPipeError, EOFError, OSError):
                         worker.pipe.send(("SHUTDOWN",))
-            if self._dispatch_gates is not None:
-                for dispatch_gate in self._dispatch_gates:
-                    for _worker in self._workers:
-                        dispatch_gate.release()
+            if self._dispatch_gate is not None:
+                for _worker in self._workers:
+                    self._dispatch_gate.release()
             for worker in self._workers:
                 worker.process.join(timeout=1.0)
                 if worker.process.is_alive():
@@ -617,71 +509,122 @@ class LIFXParallelRuntime:
                 worker.pipe.close()
             self._workers.clear()
 
+    def _spawn_worker(self, index: int, host: str) -> _Worker:
+        """Start one worker in its fixed member slot."""
+        assert self._context is not None
+        assert self._dispatch_gate is not None
+        assert self._source is not None
+        assert self._stop_event is not None
+        parent, child = self._context.Pipe(duplex=True)
+        process = self._context.Process(
+            target=_worker,
+            args=(
+                host,
+                self._source,
+                child,
+                self._dispatch_gate,
+                self._current_generation,
+                self._stop_event,
+                self.port,
+            ),
+            name=f"lifx-parallel-{index}-{host}",
+        )
+        process.start()
+        child.close()
+        return _Worker(host, process, parent)
+
+    def _replace_dead_worker(self, index: int) -> None:
+        """Replace an exact worker slot only after confirmed process death."""
+        worker = self._workers[index]
+        if worker.process.is_alive():
+            return
+        worker.process.join(timeout=0)
+        worker.pipe.close()
+        replacement = self._spawn_worker(index, worker.host)
+        self._workers[index] = replacement
+        self._collect_selected(
+            {replacement.pipe: replacement}, "PREFLIGHT_OK", 5.0, None
+        )
+
+    def _replace_dead_workers(self) -> None:
+        """Restore only the slots whose process has genuinely exited."""
+        for index in range(len(self._workers)):
+            self._replace_dead_worker(index)
+
     async def async_dispatch(
         self,
         commands: tuple[ParallelCommand, ...],
-        on_ack: Callable[[int, int], None] | None = None,
     ) -> None:
-        """Stage a command per worker, then receive its acknowledgement."""
-        await self.hass.async_add_executor_job(self._dispatch, commands, on_ack)
+        """Release one no-ACK command per worker from the shared dispatch gate."""
+        await self.hass.async_add_executor_job(self._queue_dispatch, commands)
 
-    async def async_stage_colors(
-        self,
-        colors: dict[int, tuple[Any, ...]],
-        on_ack: Callable[[int], None] | None = None,
-    ) -> None:
-        """Set colors on powered-off members before their shared power deadline."""
-        if colors:
-            await self.hass.async_add_executor_job(self._stage_colors, colors, on_ack)
-
-    async def async_query_states(self) -> tuple[ParallelLightState, ...]:
-        """Fetch device-confirmed visual state through the worker sockets."""
-        return await self.hass.async_add_executor_job(self._query_states)
-
-    def _stage_colors(
-        self, colors: dict[int, tuple[Any, ...]], on_ack: Callable[[int], None] | None
-    ) -> None:
-        if not self.available:
+    def _queue_dispatch(self, commands: tuple[ParallelCommand, ...]) -> None:
+        """Replace only work that has not reached the common gate."""
+        if len(commands) != len(self._workers):
             raise HomeAssistantError("The LIFX Device Group transport is unavailable")
-        with self._lock:
+        with self._dispatch_condition:
+            if self._dispatcher_stopping:
+                raise HomeAssistantError("The LIFX Device Group transport is stopped")
             self._request_id += 1
-            request_id = self._request_id
-            selected: dict[Connection, _Worker] = {}
+            request = _DispatchRequest(self._request_id, commands, threading.Event())
+            if self._pending_dispatch is not None:
+                self._pending_dispatch.error = HomeAssistantError(
+                    "LIFX Device Group command superseded"
+                )
+                self._pending_dispatch.done.set()
+            self._pending_dispatch = request
+            self._current_generation.value = request.request_id
+            self._dispatch_condition.notify()
+        request.done.wait()
+        if request.error is not None:
+            raise request.error
+
+    def _dispatch_loop(self) -> None:
+        """Serialize pipe ownership while allowing queued work to be superseded."""
+        while True:
+            with self._dispatch_condition:
+                while self._pending_dispatch is None and not self._dispatcher_stopping:
+                    self._dispatch_condition.wait()
+                if self._dispatcher_stopping:
+                    return
+                request = self._pending_dispatch
+                self._pending_dispatch = None
+            assert request is not None
             try:
-                for index, payload in colors.items():
-                    worker = self._workers[index]
-                    worker.pipe.send(("STAGE", request_id, payload))
-                    selected[worker.pipe] = worker
-            except (BrokenPipeError, EOFError, OSError) as err:
-                raise HomeAssistantError(
-                    "A LIFX parallel worker is unavailable"
-                ) from err
-            worker_indices = {
-                worker.pipe: index for index, worker in enumerate(self._workers)
-            }
-            self._collect_selected(
-                selected,
-                "STAGED",
-                5.0,
-                request_id,
-                (
-                    None
-                    if on_ack is None
-                    else lambda worker, _message: on_ack(worker_indices[worker.pipe])
-                ),
-            )
+                self._dispatch(request.request_id, request.commands)
+            except HomeAssistantError as err:
+                request.error = err
+            finally:
+                request.done.set()
+
+    async def async_request_reconnect(self, index: int, host: str) -> None:
+        """Ask one living worker to re-probe its member without replacing it."""
+        await self.hass.async_add_executor_job(self._request_reconnect, index, host)
+
+    def _request_reconnect(self, index: int, host: str) -> None:
+        with self._lock:
+            if index >= len(self._workers):
+                raise HomeAssistantError("Unknown LIFX parallel worker")
+            self._replace_dead_worker(index)
+            worker = self._workers[index]
+            try:
+                worker.pipe.send(("RECONNECT", host))
+                self._collect_selected(
+                    {worker.pipe: worker}, "RECONNECTED", 1.5, None
+                )
+                worker.host = host
+            except (BrokenPipeError, EOFError, OSError, HomeAssistantError) as err:
+                raise HomeAssistantError("Unable to reconnect LIFX parallel worker") from err
 
     def _dispatch(
         self,
+        request_id: int,
         commands: tuple[ParallelCommand, ...],
-        on_ack: Callable[[int, int], None] | None,
     ) -> None:
-        if len(commands) != len(self._workers) or not self.available:
+        if len(commands) != len(self._workers):
             raise HomeAssistantError("The LIFX Device Group transport is unavailable")
         with self._lock:
-            self._request_id += 1
-            request_id = self._request_id
-            second_workers: dict[Connection, _Worker] = {}
+            self._replace_dead_workers()
             try:
                 for worker, command in zip(self._workers, commands, strict=True):
                     command_specs = [(command.kind, command.payload)]
@@ -689,65 +632,31 @@ class LIFXParallelRuntime:
                         command_specs.append(
                             (command.second.kind, command.second.payload)
                         )
-                        second_workers[worker.pipe] = worker
                     worker.pipe.send(("PREPARE", request_id, tuple(command_specs)))
-                self._collect("READY", 5.0, request_id)
+                self._collect("READY", 0.25, request_id)
             except (BrokenPipeError, EOFError, HomeAssistantError, OSError) as err:
-                for dispatch_gate in self._dispatch_gates:
-                    for _worker in self._workers:
-                        dispatch_gate.release()
+                for _worker in self._workers:
+                    self._dispatch_gate.release()
                 raise _ParallelPreparationError(str(err)) from err
 
-            worker_indices = {
-                worker.pipe: index for index, worker in enumerate(self._workers)
-            }
-            self._dispatch_at_deadline(self._dispatch_gates[0], self._workers)
-            try:
-                self._collect(
-                    "ACK",
-                    5.0,
-                    request_id,
-                    (
-                        None
-                        if on_ack is None
-                        else lambda worker, _message: on_ack(
-                            worker_indices[worker.pipe], 0
-                        )
-                    ),
-                )
-            except HomeAssistantError:
-                self._abort_second_phase(second_workers, request_id)
-                raise
-
-            if not second_workers:
+            if self._current_generation.value != request_id:
+                for _worker in self._workers:
+                    self._dispatch_gate.release()
                 return
+
+            self._dispatch_at_deadline(self._dispatch_gate, self._workers)
             try:
-                for _worker in second_workers.values():
-                    worker.pipe.send(("DISPATCH_SECOND", request_id))
-                self._collect_selected(
-                    second_workers,
-                    "READY_SECOND",
-                    5.0,
-                    request_id,
-                )
-            except (BrokenPipeError, EOFError, HomeAssistantError, OSError) as err:
-                for _worker in second_workers.values():
-                    self._dispatch_gates[1].release()
-                raise _ParallelPreparationError(str(err)) from err
-            self._dispatch_at_deadline(
-                self._dispatch_gates[1], tuple(second_workers.values())
-            )
-            self._collect_selected(
-                second_workers,
-                "ACK",
-                5.0,
-                request_id,
-                (
-                    None
-                    if on_ack is None
-                    else lambda worker, _message: on_ack(worker_indices[worker.pipe], 1)
-                ),
-            )
+                self._collect("SENT", 1.0, request_id)
+            except HomeAssistantError:
+                # A UDP failure is command-local; re-probe living workers before
+                # a later request without exposing it as group availability.
+                for worker in self._workers:
+                    if worker.process.is_alive():
+                        with suppress(BrokenPipeError, EOFError, OSError):
+                            worker.pipe.send(("RECONNECT", worker.host))
+                with suppress(HomeAssistantError):
+                    self._collect("RECONNECTED", 1.5)
+                raise
 
     @staticmethod
     def _dispatch_at_deadline(dispatch_gate: Any, workers: Iterable[_Worker]) -> None:
@@ -759,35 +668,6 @@ class LIFXParallelRuntime:
             pass
         for _worker in workers:
             dispatch_gate.release()
-
-    def _abort_second_phase(
-        self, workers: dict[Connection, _Worker], request_id: int
-    ) -> None:
-        """Return workers waiting after a failed first phase to the command loop."""
-        if not workers:
-            return
-        try:
-            for worker in workers.values():
-                worker.pipe.send(("ABORT_SECOND", request_id))
-            self._collect_selected(workers, "ABORTED", 5.0, request_id)
-        except BrokenPipeError, EOFError, HomeAssistantError, OSError:
-            pass
-
-    def _query_states(self) -> tuple[ParallelLightState, ...]:
-        if not self.available:
-            raise HomeAssistantError("The LIFX Device Group transport is unavailable")
-        with self._lock:
-            self._request_id += 1
-            request_id = self._request_id
-            try:
-                for worker in self._workers:
-                    worker.pipe.send(("QUERY_STATE", request_id))
-            except (BrokenPipeError, EOFError, OSError) as err:
-                raise HomeAssistantError(
-                    "A LIFX parallel worker is unavailable"
-                ) from err
-            responses = self._collect("STATE", 5.0, request_id)
-            return tuple(responses[worker.pipe][2] for worker in self._workers)
 
     def _collect(
         self,

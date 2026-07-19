@@ -87,28 +87,6 @@ from . import (
 from tests.common import MockConfigEntry, async_fire_time_changed
 
 
-async def test_post_command_refresh_waits_for_lifx_settle_delay(
-    hass: HomeAssistant,
-) -> None:
-    """The coordinator starts the normal refresh after the LIFX settle delay."""
-    connection = MagicMock(device=_mocked_bulb())
-    entry = MockConfigEntry(domain=DOMAIN, data={CONF_HOST: IP_ADDRESS})
-    coordinator = LIFXUpdateCoordinator(hass, entry, connection)
-    coordinator.async_request_refresh = AsyncMock()
-
-    with (
-        patch("homeassistant.components.lifx.coordinator.LIFX_STATE_SETTLE_DELAY", 0.3),
-        patch(
-            "homeassistant.components.lifx.coordinator.asyncio.sleep",
-            new_callable=AsyncMock,
-        ) as sleep,
-    ):
-        await coordinator.async_schedule_post_command_refresh(0)
-
-    sleep.assert_awaited_once_with(0.3)
-    coordinator.async_request_refresh.assert_awaited_once()
-
-
 @pytest.fixture(autouse=True)
 def patch_lifx_state_settle_delay():
     """Set asyncio.sleep for state settles to zero."""

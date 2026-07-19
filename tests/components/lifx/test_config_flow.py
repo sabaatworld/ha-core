@@ -11,7 +11,13 @@ import pytest
 from homeassistant import config_entries
 from homeassistant.components.lifx import DOMAIN
 from homeassistant.components.lifx.config_flow import LifXConfigFlow
-from homeassistant.components.lifx.const import CONF_SERIAL
+from homeassistant.components.lifx.const import (
+    CONF_ENTRY_TYPE,
+    CONF_GROUP_ID,
+    CONF_MEMBERS,
+    CONF_SERIAL,
+    ENTRY_TYPE_PARALLEL_GROUP,
+)
 from homeassistant.const import CONF_DEVICE, CONF_HOST
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
@@ -64,6 +70,39 @@ async def _async_start_device_flow(hass: HomeAssistant) -> dict[str, Any]:
     return await hass.config_entries.flow.async_configure(
         result["flow_id"], {"next_step_id": "device"}
     )
+
+
+async def test_parallel_group_config_flow(hass: HomeAssistant) -> None:
+    """Test creating a Device Group from two configured physical lights."""
+    first = MockConfigEntry(domain=DOMAIN, data={CONF_HOST: "192.0.2.1"})
+    second = MockConfigEntry(domain=DOMAIN, data={CONF_HOST: "192.0.2.2"})
+    first.add_to_hass(hass)
+    second.add_to_hass(hass)
+    entity_registry = er.async_get(hass)
+    first_entity = entity_registry.async_get_or_create(
+        "light", DOMAIN, "first", config_entry=first, original_name="First"
+    )
+    second_entity = entity_registry.async_get_or_create(
+        "light", DOMAIN, "second", config_entry=second, original_name="Second"
+    )
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"next_step_id": "parallel_group"}
+    )
+    assert result["type"] is FlowResultType.FORM
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {"name": "Kitchen", "members": [first_entity.entity_id, second_entity.entity_id]},
+    )
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["title"] == "Kitchen"
+    assert result["data"][CONF_ENTRY_TYPE] == ENTRY_TYPE_PARALLEL_GROUP
+    assert result["data"][CONF_GROUP_ID]
+    assert result["data"][CONF_MEMBERS] == sorted((first.entry_id, second.entry_id))
 
 
 async def test_discovery(hass: HomeAssistant) -> None:

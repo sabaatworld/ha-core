@@ -47,6 +47,7 @@ from .const import (
     MESSAGE_RETRIES,
     MESSAGE_TIMEOUT,
     OVERALL_TIMEOUT,
+    PHYSICAL_LIGHT_POLL_INTERVAL,
     TARGET_ANY,
     UNAVAILABLE_GRACE,
 )
@@ -59,7 +60,6 @@ from .util import (
     lifx_features,
 )
 
-LIGHT_UPDATE_INTERVAL = 10
 REQUEST_REFRESH_DELAY = 0.35
 LIFX_IDENTIFY_DELAY = 3.0
 ZONES_PER_COLOR_UPDATE_REQUEST = 8
@@ -117,7 +117,7 @@ class LIFXUpdateCoordinator(DataUpdateCoordinator[None]):
             LOGGER,
             config_entry=config_entry,
             name=f"{config_entry.title} ({self.device.ip_addr})",
-            update_interval=timedelta(seconds=LIGHT_UPDATE_INTERVAL),
+            update_interval=timedelta(seconds=PHYSICAL_LIGHT_POLL_INTERVAL),
             # We don't want an immediate refresh since the device
             # takes a moment to reflect the state change
             request_refresh_debouncer=Debouncer(
@@ -133,7 +133,7 @@ class LIFXUpdateCoordinator(DataUpdateCoordinator[None]):
         self.device.unregister_timeout = UNAVAILABLE_GRACE
 
     async def async_schedule_post_command_refresh(self, duration_ms: int) -> None:
-        """Refresh state after a command while superseding older commands."""
+        """Refresh a physical light after its command settles."""
         self._post_command_generation += 1
         generation = self._post_command_generation
         if self._postponed_refresh is not None:
@@ -149,19 +149,16 @@ class LIFXUpdateCoordinator(DataUpdateCoordinator[None]):
             return
 
         async def _async_refresh(_now: datetime) -> None:
-            """Refresh state once the current transition has completed."""
             if generation == self._post_command_generation:
                 await self.async_refresh()
 
         self._postponed_refresh = async_call_later(
-            self.hass,
-            timedelta(milliseconds=duration_ms),
-            _async_refresh,
+            self.hass, timedelta(milliseconds=duration_ms), _async_refresh
         )
 
     @callback
     def async_cancel_post_command_refresh(self) -> None:
-        """Cancel a delayed physical-state refresh."""
+        """Cancel a delayed physical-light refresh."""
         self._post_command_generation += 1
         if self._postponed_refresh is not None:
             self._postponed_refresh()
