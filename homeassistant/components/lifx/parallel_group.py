@@ -27,6 +27,7 @@ from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import (
+    _LOGGER,
     CONF_GROUP_ID,
     CONF_MEMBERS,
     DATA_LIFX_MANAGER,
@@ -46,7 +47,6 @@ from .manager import (
     ATTR_SATURATION_MIN,
     ATTR_SKY_TYPE,
     ATTR_SPEED,
-    ATTR_SPREAD,
     ATTR_THEME,
     EFFECT_FLAME_DEFAULT_SPEED,
     EFFECT_MORPH_DEFAULT_SPEED,
@@ -387,26 +387,39 @@ class LIFXParallelGroupRuntime:
         if self._recovery_task is not None:
             raise HomeAssistantError("The LIFX Device Group is recovering")
 
+    def _display_state_for_command(self, operation: str) -> _OptimisticGroupState:
+        """Snapshot and log the displayed state used to build one operation."""
+        display_state = self.display_state
+        _LOGGER.debug(
+            "LIFX Device Group %s %s state baseline: color=%s is_on=%s",
+            self.group_id,
+            operation,
+            display_state.color,
+            display_state.is_on,
+        )
+        return display_state
+
     async def _async_set_state(self, **kwargs: Any) -> None:
         """Dispatch a state change without delaying a newer request."""
         power = kwargs.get("power")
         hsbk = find_hsbk(self.hass, **kwargs)
+        display_state = self._display_state_for_command("state command")
+        display_power_level = 65535 if display_state.is_on else 0
         commands: list[ParallelCommand] = []
         states: list[_MemberCommandState] = []
 
-        for index, member in enumerate(self.members):
-            device = member.device
-            color = tuple(merge_hsbk(device.color, hsbk)) if hsbk else None
+        for member in self.members:
+            color = tuple(merge_hsbk(display_state.color, hsbk)) if hsbk else None
             duration = self._transition_ms(member, power, kwargs)
-            target_color = color or tuple(device.color)
+            target_color = color or display_state.color
             target_power = (
-                65535 if power is True else 0 if power is False else device.power_level
+                65535 if power is True else 0 if power is False else display_power_level
             )
             states.append(_MemberCommandState(target_color, target_power))
             if power is False and color is not None:
                 color_command = ParallelCommand("color", (*color, duration))
                 power_command = ParallelCommand("power", (False, duration))
-                if device.power_level:
+                if display_state.is_on:
                     commands.append(
                         ParallelCommand(
                             color_command.kind,
@@ -424,7 +437,7 @@ class LIFXParallelGroupRuntime:
                     )
                 else:
                     commands.append(color_command)
-            elif power is True and color is not None and device.power_level == 0:
+            elif power is True and color is not None and not display_state.is_on:
                 commands.append(
                     ParallelCommand(
                         "color", (*color, 0), ParallelCommand("power", (True, duration))
@@ -589,6 +602,7 @@ class LIFXParallelGroupRuntime:
 
     async def _async_stop_firmware_effects(self) -> None:
         """Stop any firmware effect active from this group."""
+        display_state = self._display_state_for_command("stop effect")
         commands = []
         for member in self.members:
             features = lifx_features(member.device)
@@ -597,7 +611,7 @@ class LIFXParallelGroupRuntime:
             elif features["multizone"]:
                 commands.append(ParallelCommand("multizone_effect", (0, 0, 0)))
             else:
-                commands.append(ParallelCommand("color", (*member.device.color, 0)))
+                commands.append(ParallelCommand("color", (*display_state.color, 0)))
         await self.parallel.async_dispatch(tuple(commands))
 
     def _theme_colors(self, **kwargs: Any) -> tuple[tuple[int, int, int, int], ...]:
@@ -610,16 +624,19 @@ class LIFXParallelGroupRuntime:
 
     async def _async_paint_theme(self, **kwargs: Any) -> None:
         """Paint one theme color per member at one common deadline."""
-        palette = self._theme_colors(**kwargs)
+        color = self._theme_colors(**kwargs)[0]
+        display_state = self._display_state_for_command("paint theme")
         duration = round(
             kwargs.get(ATTR_TRANSITION, PAINT_THEME_DEFAULT_TRANSITION) * 1000
         )
         states = tuple(
             _MemberCommandState(
-                palette[index % len(palette)],
-                65535 if kwargs.get(ATTR_POWER_ON, True) else member.device.power_level,
+                color,
+                65535 if kwargs.get(ATTR_POWER_ON, True) else 65535
+                if display_state.is_on
+                else 0,
             )
-            for index, member in enumerate(self.members)
+            for _member in self.members
         )
         commands = tuple(
             ParallelCommand("color", (*state.color, duration)) for state in states
@@ -651,23 +668,22 @@ class LIFXParallelGroupRuntime:
         """Run colorloop ticks through the same warmed worker dispatcher."""
         period = kwargs.get(ATTR_PERIOD, 60)
         change = kwargs.get(ATTR_CHANGE, 20)
-        spread = kwargs.get(ATTR_SPREAD, 30)
         transition = kwargs.get(ATTR_TRANSITION, min(period, 1))
         saturation_min = kwargs.get(ATTR_SATURATION_MIN, 80)
         saturation_max = kwargs.get(ATTR_SATURATION_MAX, 100)
         brightness = kwargs.get("brightness")
+        display_state = self._display_state_for_command("colorloop")
         tick = 0
         while True:
             commands = []
-            for index, member in enumerate(self.members):
+            for member in self.members:
                 hue = (
-                    member.device.color[0] / 65535 * 360
+                    display_state.color[0] / 65535 * 360
                     + tick * change
-                    + index * spread
                 ) % 360
                 saturation = saturation_min if tick % 2 else saturation_max
                 level = (
-                    member.device.color[2] if brightness is None else brightness * 257
+                    display_state.color[2] if brightness is None else brightness * 257
                 )
                 command = ParallelCommand(
                     "color",
@@ -675,7 +691,7 @@ class LIFXParallelGroupRuntime:
                         round(hue / 360 * 65535),
                         round(saturation / 100 * 65535),
                         level,
-                        member.device.color[3],
+                        display_state.color[3],
                         round(transition * 1000),
                     ),
                 )

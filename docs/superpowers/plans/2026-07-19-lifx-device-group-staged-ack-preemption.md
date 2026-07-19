@@ -1,8 +1,8 @@
 # LIFX Device Group Staged ACK Preemption Implementation Plan
 
-**Goal:** Make every dependent multi-command Device Group operation send each
-stage at a common low-skew deadline, require acknowledgements before advancing
-to its next stage, and immediately preempt stale ACK waits for newer commands.
+**Goal:** Make every Device Group write send at a common low-skew deadline,
+require acknowledgements with physical-light retry behavior, and immediately
+preempt stale ACK waits for newer commands.
 
 ## Global constraints
 
@@ -12,15 +12,18 @@ to its next stage, and immediately preempt stale ACK waits for newer commands.
 - Keep one spawned warm worker process and connected UDP socket per member.
   An ACK timeout, malformed datagram, cancellation, or ordinary UDP failure
   must not kill, replace, or unload a living worker.
-- A non-final command stage sets the LIFX ACK-required flag. Every targeted
-  member must return a correlated ACK before the next stage is prepared.
-- Each ACK stage has five total sends, one 3-second ACK window per send, and a
-  15-second maximum. On incomplete ACK collection, send no later stage.
+- Every mutation command stage sets the LIFX ACK-required flag. Every targeted
+  member must return a correlated ACK before that stage completes or the next
+  stage is prepared.
+- Each ACK stage has five total sends and one full 3-second ACK window per
+  send, matching physical setters' 15 seconds of ACK wait. The bounded worker
+  prepare/gate handoff occurs before each window. On incomplete ACK collection,
+  send no later stage.
 - A newer command immediately invalidates the active request. Do not queue it
   behind an ACK wait, do not retry the old request, and do not let any delayed
   ACK authorize an old later stage.
-- Every stage has a distinct shared absolute send deadline. A single-command
-  request retains the existing fire-and-forget low-skew dispatch behavior.
+- Every stage, including a single-command request and a final dependent stage,
+  has its own distinct shared absolute send deadline and retry budget.
 - Device Group availability remains derived exclusively from its physical
   coordinators; command failure is local to the command.
 
@@ -47,8 +50,8 @@ to its next stage, and immediately preempt stale ACK waits for newer commands.
 - Extend `ParallelCommand.second` into an ordered staged traversal that allows
   a member to skip a stage while the group remains synchronized, without a
   broad compatibility-breaking representation change.
-- Add builders and parsers for correlated LIFX acknowledgement messages. Keep
-  final stages fire-and-forget unless they precede another dependent stage.
+- Add builders and parsers for correlated LIFX acknowledgement messages for
+  every Device Group mutation stage.
 
 ### 2. Implement worker-stage ACK and cancellation behavior
 
@@ -70,9 +73,10 @@ to its next stage, and immediately preempt stale ACK waits for newer commands.
 - Refactor the dispatcher so it owns staged worker-pipe I/O and supports an
   active request plus an immediate replacement signal, not a queue behind ACK
   collection.
-- On preemption, invalidate the active generation, send worker cancellation,
-  drain only cancellation reports, and begin preparing the newest command as
-  soon as every worker is idle. Do not replay intermediate requests.
+- On preemption, invalidate the active generation, signal worker cancellation,
+  release the old caller immediately, and begin preparing only the newest
+  command without a cancellation grace wait. Preserve stale worker events until
+  their owning request can safely discard them.
 - Retry unresolved ACK targets at a fresh shared deadline, up to five total
   attempts. Stop the stage immediately on preemption or after the fifth
   unsuccessful attempt.
@@ -86,7 +90,7 @@ to its next stage, and immediately preempt stale ACK waits for newer commands.
 - Convert power-before-effect, power-before-theme, power-before-pulse, and
   power-before-colorloop flows from independent dispatches into one staged
   operation whenever a later command depends on a successful power command.
-- Leave unrelated one-packet actions on the original fire-and-forget path.
+- Apply the same ACK/retry behavior to unrelated one-packet mutation actions.
 
 ### 5. Verify behavior and review
 
@@ -98,3 +102,14 @@ to its next stage, and immediately preempt stale ACK waits for newer commands.
 - Perform up to three independent review/fix cycles. Each reviewer checks this
   plan and the complete diff; apply all Critical and Important findings from a
   cycle in one change set, rerun the affected HA-host tests, then re-review.
+
+### 6. Add staged-dispatch diagnostics
+
+- Log the complete staged command and payload per member when a request is
+  accepted, including each worker host.
+- Log prepare, worker-ready, common-dispatch deadline, final send, ACK receipt,
+  retry, timeout, preemption, and cancellation confirmation with request and
+  stage identities. Forward worker event detail through the supervisor logger
+  so it appears in Home Assistant debug logs despite process isolation.
+- Keep this instrumentation at DEBUG level only. Include targets, sequences,
+  payloads, and hosts when available to support on/off synchronization analysis.

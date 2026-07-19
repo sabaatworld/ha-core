@@ -1,11 +1,13 @@
 """Test LIFX Device Group behavior."""
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from homeassistant.components.lifx.const import CONF_GROUP_ID, DOMAIN
 from homeassistant.components.lifx.coordinator import LIFXUpdateCoordinator
+from homeassistant.components.lifx.manager import SERVICE_EFFECT_MOVE
 from homeassistant.components.lifx.parallel import ParallelCommand
 from homeassistant.components.lifx.parallel_group import (
     LIFXParallelGroupRuntime,
@@ -13,7 +15,6 @@ from homeassistant.components.lifx.parallel_group import (
     _members_are_ready,
     async_setup_parallel_group_entry,
 )
-from homeassistant.components.lifx.manager import SERVICE_EFFECT_MOVE
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
@@ -231,6 +232,98 @@ async def test_turning_on_an_off_member_with_color_uses_staged_commands(
     assert all(command.second.kind == "power" for command in commands)
 
 
+async def test_displayed_off_state_stages_color_and_power_for_every_member(
+    hass: HomeAssistant,
+) -> None:
+    """A group target, rather than mixed member caches, controls power staging."""
+    runtime, members = _runtime(hass)
+    members[0].device.power_level = 65535
+    members[1].device.power_level = 0
+    members[0].device.color = [1, 2, 3, 3500]
+    members[1].device.color = [4, 5, 6, 4000]
+    runtime._begin_projection(
+        (
+            _MemberCommandState((100, 200, 300, 3500), 0),
+            _MemberCommandState((100, 200, 300, 3500), 0),
+        )
+    )
+
+    await runtime.async_set_state(power=True, brightness=255)
+
+    commands = runtime.parallel.async_dispatch.await_args.args[0]
+    assert all(command.kind == "color" for command in commands)
+    assert all(command.payload == commands[0].payload for command in commands)
+    assert all(command.second is not None for command in commands)
+    assert all(command.second.kind == "power" for command in commands)
+
+
+async def test_expired_display_state_uses_one_aggregate_baseline_for_all_members(
+    hass: HomeAssistant,
+) -> None:
+    """After expiry, command construction uses display aggregation, not member caches."""
+    runtime, members = _runtime(hass)
+    members[0].device.color = [100, 200, 300, 3500]
+    members[1].device.color = [500, 600, 700, 4500]
+    members[0].device.power_level = 0
+    members[1].device.power_level = 65535
+
+    await runtime.async_set_state(brightness=255)
+
+    commands = runtime.parallel.async_dispatch.await_args.args[0]
+    assert all(command.kind == "color" for command in commands)
+    assert all(command.payload == commands[0].payload for command in commands)
+
+
+async def test_displayed_on_state_stages_color_before_power_off_for_every_member(
+    hass: HomeAssistant,
+) -> None:
+    """A displayed on target controls turn-off staging despite off member caches."""
+    runtime, members = _runtime(hass)
+    for member in members:
+        member.device.power_level = 0
+    runtime._begin_projection(
+        (
+            _MemberCommandState((100, 200, 300, 3500), 65535),
+            _MemberCommandState((100, 200, 300, 3500), 65535),
+        )
+    )
+
+    await runtime.async_set_state(power=False, brightness=255)
+
+    commands = runtime.parallel.async_dispatch.await_args.args[0]
+    assert all(command.kind == "color" for command in commands)
+    assert all(command.second is not None for command in commands)
+    assert all(command.second.kind == "power" for command in commands)
+
+
+async def test_colorloop_uses_one_displayed_state_baseline_for_every_member(
+    hass: HomeAssistant,
+) -> None:
+    """Colorloop must not derive independent hues from physical member caches."""
+    runtime, members = _runtime(hass)
+    members[0].device.color = [100, 200, 300, 3500]
+    members[1].device.color = [500, 600, 700, 4500]
+    runtime._begin_projection(
+        (
+            _MemberCommandState((1000, 2000, 3000, 3500), 65535),
+            _MemberCommandState((1000, 2000, 3000, 3500), 65535),
+        )
+    )
+
+    task = asyncio.create_task(
+        runtime._async_colorloop(period=60, change=0, power_on=False)
+    )
+    await asyncio.sleep(0)
+
+    commands = runtime.parallel.async_dispatch.await_args.args[0]
+    assert all(command.kind == "color" for command in commands)
+    assert all(command.payload == commands[0].payload for command in commands)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
 async def test_paint_theme_stages_power_before_color(
     hass: HomeAssistant,
 ) -> None:
@@ -239,7 +332,7 @@ async def test_paint_theme_stages_power_before_color(
 
     await runtime._async_paint_theme(
         power_on=True,
-        palette=[(0, 100, 100, 3500)],
+        palette=[(0, 100, 100, 3500), (240, 50, 25, 4000)],
         transition=0,
     )
 
@@ -248,6 +341,8 @@ async def test_paint_theme_stages_power_before_color(
     assert all(command.kind == "power" for command in commands)
     assert all(command.second is not None for command in commands)
     assert all(command.second.kind == "color" for command in commands)
+    assert all(command.second.payload == commands[0].second.payload for command in commands)
+    assert commands[0].second.payload == (0, 65535, 65535, 3500, 0)
 
 
 async def test_turning_off_with_a_transition_stages_power_before_color(
