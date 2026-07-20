@@ -111,6 +111,8 @@ class LIFXUpdateCoordinator(DataUpdateCoordinator[None]):
         self.transition_off_duration: float = 0.0
         self._postponed_refresh: CALLBACK_TYPE | None = None
         self._post_command_generation = 0
+        self.virtual_off = False
+        self.resume_hsbk: tuple[int, int | None, int, int] | None = None
 
         super().__init__(
             hass,
@@ -168,6 +170,54 @@ class LIFXUpdateCoordinator(DataUpdateCoordinator[None]):
     def rssi(self) -> int:
         """Return stored RSSI value."""
         return self._rssi
+
+    @property
+    def actual_power_on(self) -> bool:
+        """Return the physical device power state, independent of virtual off."""
+        return bool(self.device.power_level)
+
+    @property
+    def display_color(self) -> tuple[int, int | None, int, int]:
+        """Return the color used to resume a virtual-off light."""
+        return self.resume_hsbk or tuple(self.device.color)
+
+    @callback
+    def async_record_virtual_off(
+        self, color: tuple[int, int | None, int, int]
+    ) -> None:
+        """Record a successful whole-light virtual power-off request."""
+        self.resume_hsbk = color
+        self.virtual_off = True
+
+    @callback
+    def async_record_virtual_on(
+        self, color: tuple[int, int | None, int, int]
+    ) -> None:
+        """Record a successful visible whole-light command."""
+        self.resume_hsbk = color
+        self.virtual_off = False
+
+    @callback
+    def async_clear_virtual_off(self) -> None:
+        """Clear a superseded Device Group virtual-off marker."""
+        self.virtual_off = False
+
+    @callback
+    def async_reconcile_virtual_power(self) -> None:
+        """Clear a virtual-off marker when polling observes external visibility."""
+        if not self.actual_power_on:
+            if self.virtual_off:
+                _LOGGER.debug("LIFX virtual off cleared after physical power-off poll")
+            self.virtual_off = False
+            return
+        visible = bool(self.device.color[2])
+        if self.is_extended_multizone or self.is_legacy_multizone:
+            visible = visible or any(color[2] for color in self.device.color_zones)
+        if visible:
+            color = tuple(self.device.color)
+            if self.virtual_off:
+                _LOGGER.debug("LIFX virtual off cleared after external visible-state poll")
+            self.async_record_virtual_on(color)
 
     @property
     def rssi_uom(self) -> str:
@@ -429,6 +479,7 @@ class LIFXUpdateCoordinator(DataUpdateCoordinator[None]):
             # The number of zones has changed so we need
             # to update the zones again. This happens rarely.
             await self.async_get_color_zones()
+        self.async_reconcile_virtual_power()
 
     async def async_get_color_zones(self) -> None:
         """Get updated color information for each zone."""

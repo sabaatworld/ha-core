@@ -188,9 +188,16 @@ class LIFXParallelGroupRuntime:
 
     @property
     def member_states(self) -> tuple[_MemberCommandState, ...]:
-        """Return only physical coordinator state."""
+        """Return physical state with each member's virtual power projection."""
         return tuple(
-            _MemberCommandState(tuple(member.device.color), member.device.power_level)
+            _MemberCommandState(
+                tuple(
+                    member.resume_hsbk
+                    if member.virtual_off and member.resume_hsbk is not None
+                    else member.device.color
+                ),
+                65535 if member.device.power_level and not member.virtual_off else 0,
+            )
             for member in self.members
         )
 
@@ -416,49 +423,44 @@ class LIFXParallelGroupRuntime:
                 65535 if power is True else 0 if power is False else display_power_level
             )
             states.append(_MemberCommandState(target_color, target_power))
-            if power is False and color is not None:
-                color_command = ParallelCommand("color", (*color, duration))
-                power_command = ParallelCommand("power", (False, duration))
-                if display_state.is_on:
-                    commands.append(
-                        ParallelCommand(
-                            color_command.kind,
-                            color_command.payload,
-                            power_command,
-                        )
-                    )
-                elif ATTR_TRANSITION in kwargs or duration:
-                    commands.append(
-                        ParallelCommand(
-                            power_command.kind,
-                            power_command.payload,
-                            color_command,
-                        )
-                    )
-                else:
-                    commands.append(color_command)
-            elif power is True and color is not None and not display_state.is_on:
+            if power is False:
                 commands.append(
                     ParallelCommand(
-                        "color", (*color, 0), ParallelCommand("power", (True, duration))
+                        "color",
+                        (*target_color[:2], 0, target_color[3], duration),
                     )
                 )
+            elif power is True and not display_state.is_on:
+                if member.device.power_level:
+                    commands.append(
+                        ParallelCommand("color", (*target_color, duration), pad_before=1)
+                    )
+                else:
+                    commands.append(
+                        ParallelCommand(
+                            "color",
+                            (*target_color, 0),
+                            ParallelCommand("power", (True, duration)),
+                        )
+                    )
             elif color is not None:
                 commands.append(ParallelCommand("color", (*color, duration)))
             elif power is not None:
-                commands.append(ParallelCommand("power", (power, duration)))
+                commands.append(ParallelCommand("color", (*target_color, duration)))
             else:
                 raise ValueError("LIFX group action did not contain a state change")
 
         await self._async_dispatch_projected_states(
             tuple(commands),
             tuple(states),
+            virtual_off=power is False,
         )
 
     async def _async_dispatch_projected_states(
         self,
         commands: tuple[ParallelCommand, ...],
         states: tuple[_MemberCommandState, ...],
+        virtual_off: bool = False,
     ) -> None:
         """Dispatch a command and keep its aggregate projection until polling catches up."""
         generation = self._begin_projection(states)
@@ -467,6 +469,12 @@ class LIFXParallelGroupRuntime:
         except HomeAssistantError:
             self._clear_projection(generation)
             raise
+        for member, state in zip(self.members, states, strict=True):
+            if virtual_off:
+                member.async_record_virtual_off(state.color)
+            elif state.power_level:
+                member.async_record_virtual_on(state.color)
+            member.async_set_updated_data(None)
 
     def _with_power_stage(
         self, commands: tuple[ParallelCommand, ...], kwargs: dict[str, Any]

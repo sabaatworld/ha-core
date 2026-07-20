@@ -59,18 +59,21 @@ class ParallelCommand:
     kind: str
     payload: tuple[Any, ...]
     second: ParallelCommand | None = None
+    pad_before: int = 0
 
     @property
-    def stages(self) -> tuple[ParallelCommand, ...]:
+    def stages(self) -> tuple[ParallelCommand | None, ...]:
         """Return this command's ordered dependency stages."""
         command = ParallelCommand(self.kind, self.payload)
-        return (command,) if self.second is None else (command, *self.second.stages)
+        stages = (command,) if self.second is None else (command, *self.second.stages)
+        return (None,) * self.pad_before + stages
 
 
 def _command_summary(command: ParallelCommand) -> str:
     """Return the complete staged command detail for debug logging."""
     return " -> ".join(
-        f"{stage.kind} payload={stage.payload!r}" for stage in command.stages
+        "wait" if stage is None else f"{stage.kind} payload={stage.payload!r}"
+        for stage in command.stages
     )
 
 
@@ -914,8 +917,10 @@ class LIFXParallelRuntime:
                 targets = tuple(
                     (worker, member_stages[stage])
                     for worker, member_stages in zip(self._workers, stages, strict=True)
-                    if stage < len(member_stages)
+                    if stage < len(member_stages) and member_stages[stage] is not None
                 )
+                if not targets:
+                    continue
                 ack_required = True
                 try:
                     with self._dispatch_condition:

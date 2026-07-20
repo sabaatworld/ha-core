@@ -1,6 +1,7 @@
 """Support for LIFX lights."""
 
 import asyncio
+from dataclasses import asdict, dataclass
 from typing import Any, override
 
 import aiolifx_effects as aiolifx_effects_module
@@ -22,6 +23,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv, entity_platform
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.restore_state import ExtraStoredData, RestoreEntity
 from homeassistant.helpers.typing import VolDictType
 
 from .const import (
@@ -74,6 +76,28 @@ HSBK_BRIGHTNESS = 2
 HSBK_KELVIN = 3
 
 
+@dataclass(frozen=True, slots=True)
+class LIFXVirtualPowerStoredData(ExtraStoredData):
+    """Stored whole-light virtual power state."""
+
+    virtual_off: bool
+    resume_hsbk: tuple[int, int | None, int, int] | None
+
+    @override
+    def as_dict(self) -> dict[str, Any]:
+        """Return JSON-serializable virtual power data."""
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, restored: dict[str, Any]) -> LIFXVirtualPowerStoredData:
+        """Restore state from Home Assistant storage."""
+        color = restored.get("resume_hsbk")
+        return cls(
+            bool(restored.get("virtual_off")),
+            tuple(color) if color is not None and len(color) == 4 else None,
+        )
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: LIFXConfigEntry,
@@ -114,7 +138,7 @@ async def async_setup_entry(
     async_add_entities([entity])
 
 
-class LIFXLight(LIFXEntity, LightEntity):
+class LIFXLight(LIFXEntity, LightEntity, RestoreEntity):
     """Representation of a LIFX light."""
 
     _attr_supported_features = LightEntityFeature.TRANSITION | LightEntityFeature.EFFECT
@@ -152,6 +176,8 @@ class LIFXLight(LIFXEntity, LightEntity):
     @override
     def brightness(self) -> int:
         """Return the brightness of this light between 0..255."""
+        if self.coordinator.virtual_off:
+            return 0
         fade = self.bulb.power_level / 65535
         return convert_16_to_8(int(fade * self.bulb.color[HSBK_BRIGHTNESS]))
 
@@ -165,7 +191,7 @@ class LIFXLight(LIFXEntity, LightEntity):
     @override
     def is_on(self) -> bool:
         """Return true if light is on."""
-        return bool(self.bulb.power_level != 0)
+        return self.coordinator.actual_power_on and not self.coordinator.virtual_off
 
     @property
     @override
@@ -231,9 +257,9 @@ class LIFXLight(LIFXEntity, LightEntity):
 
             kwargs[ATTR_BRIGHTNESS] = max(0, min(255, brightness))
 
-        # These are both False if ATTR_POWER is not set
         power_on = kwargs.get(ATTR_POWER, False)
         power_off = not kwargs.get(ATTR_POWER, True)
+        physical_power_off = kwargs.get(ATTR_POWER) is False
 
         has_transition = ATTR_TRANSITION in kwargs
         if has_transition:
@@ -248,7 +274,39 @@ class LIFXLight(LIFXEntity, LightEntity):
 
         hsbk = find_hsbk(self.hass, **kwargs)
 
-        if not self.is_on:
+        if (
+            power_on
+            and self.coordinator.virtual_off
+            and self.coordinator.resume_hsbk is not None
+        ):
+            hsbk = merge_hsbk(
+                list(self.coordinator.resume_hsbk), hsbk or [None] * 4
+            )
+
+        if physical_power_off:
+            self.coordinator.async_clear_virtual_off()
+            if not self.is_on:
+                if has_transition:
+                    await self.set_power(False, duration=0)
+                else:
+                    await self.set_power(False)
+                if hsbk:
+                    await self.set_color(hsbk, kwargs, duration=fade)
+            else:
+                if hsbk:
+                    await self.set_color(hsbk, kwargs, duration=fade)
+                await self.set_power(False, duration=fade)
+        elif self.coordinator.virtual_off:
+            target = tuple(
+                merge_hsbk(list(self.coordinator.display_color), hsbk or [None] * 4)
+            )
+            if self.coordinator.actual_power_on:
+                await self.set_color(list(target), kwargs, duration=fade)
+            else:
+                await self.set_color(list(target), kwargs)
+                await self.set_power(True, duration=fade)
+            self.coordinator.async_record_virtual_on(target)
+        elif not self.is_on:
             if power_off:
                 if has_transition:
                     await self.set_power(False, duration=0)
@@ -363,7 +421,20 @@ class LIFXLight(LIFXEntity, LightEntity):
         self.async_on_remove(
             self.manager.async_register_entity(self.entity_id, self.coordinator)
         )
-        return await super().async_added_to_hass()
+        await super().async_added_to_hass()
+        if (last_data := await self.async_get_last_extra_data()) is not None:
+            data = LIFXVirtualPowerStoredData.from_dict(last_data.as_dict())
+            self.coordinator.virtual_off = data.virtual_off
+            self.coordinator.resume_hsbk = data.resume_hsbk
+        self.coordinator.async_reconcile_virtual_power()
+
+    @override
+    @property
+    def extra_restore_state_data(self) -> LIFXVirtualPowerStoredData:
+        """Return virtual power state persisted by Home Assistant."""
+        return LIFXVirtualPowerStoredData(
+            self.coordinator.virtual_off, self.coordinator.resume_hsbk
+        )
 
     @override
     async def async_will_remove_from_hass(self) -> None:
@@ -436,7 +507,7 @@ class LIFXMultiZone(LIFXColor):
         duration_ms = round(duration * 1000)
 
         # Zone brightness is not reported when powered off
-        if not self.is_on and hsbk[HSBK_BRIGHTNESS] is None:
+        if not self.coordinator.actual_power_on and hsbk[HSBK_BRIGHTNESS] is None:
             await self.set_power(True)
             await asyncio.sleep(LIFX_STATE_SETTLE_DELAY)
             await self.update_color_zones()

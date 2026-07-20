@@ -2,7 +2,7 @@
 
 from datetime import timedelta
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import aiolifx_effects
 import pytest
@@ -10,7 +10,6 @@ import pytest
 from homeassistant.components import lifx
 from homeassistant.components.lifx import DOMAIN
 from homeassistant.components.lifx.const import ATTR_POWER
-from homeassistant.components.lifx.coordinator import LIFXUpdateCoordinator
 from homeassistant.components.lifx.light import ATTR_INFRARED, ATTR_ZONES
 from homeassistant.components.lifx.manager import (
     ATTR_CLOUD_SATURATION_MAX,
@@ -489,6 +488,36 @@ async def test_transition_duration_legacy_multizone(hass: HomeAssistant) -> None
 
     assert len(bulb.set_color_zones.calls) == 3
     assert {call[1]["duration"] for call in bulb.set_color_zones.calls} == {1500}
+
+
+async def test_direct_physical_power_off_does_not_create_virtual_off(
+    hass: HomeAssistant,
+) -> None:
+    """A direct physical turn-off remains a physical power command."""
+    config_entry = MockConfigEntry(
+        domain=DOMAIN, data={CONF_HOST: "127.0.0.1"}, unique_id=SERIAL
+    )
+    config_entry.add_to_hass(hass)
+    bulb = _mocked_bulb_new_firmware()
+    bulb.power_level = 65535
+    bulb.color = [32000, 10000, 30000, 6000]
+    with (
+        _patch_discovery(device=bulb),
+        _patch_config_flow_try_connect(device=bulb),
+        _patch_device(device=bulb),
+    ):
+        await async_setup_component(hass, lifx.DOMAIN, {lifx.DOMAIN: {}})
+        await hass.async_block_till_done()
+
+    config_entry.runtime_data.async_record_virtual_off((32000, 10000, 30000, 6000))
+    entity_id = "light.my_group_my_bulb"
+    await hass.services.async_call(
+        LIGHT_DOMAIN, "turn_off", {ATTR_ENTITY_ID: entity_id}, blocking=True
+    )
+
+    assert bulb.set_power.calls[-1][0][0] is False
+    assert not config_entry.runtime_data.virtual_off
+    assert config_entry.runtime_data.resume_hsbk == (32000, 10000, 30000, 6000)
 
 
 async def test_extended_multizone_messages(hass: HomeAssistant) -> None:
