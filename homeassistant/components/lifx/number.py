@@ -7,7 +7,11 @@ from homeassistant.const import EntityCategory, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .const import TRANSITION_OFF_DURATION, TRANSITION_ON_DURATION
+from .const import (
+    TRANSITION_CROSS_DURATION,
+    TRANSITION_OFF_DURATION,
+    TRANSITION_ON_DURATION,
+)
 from .coordinator import LIFXConfigEntry, LIFXUpdateCoordinator
 from .entity import LIFXEntity
 from .parallel_group import async_add_parallel_group_entities
@@ -25,6 +29,15 @@ TRANSITION_DURATION_ENTITIES = (
     NumberEntityDescription(
         key=TRANSITION_OFF_DURATION,
         translation_key=TRANSITION_OFF_DURATION,
+        entity_category=EntityCategory.CONFIG,
+        native_min_value=0,
+        native_max_value=300,
+        native_step=0.1,
+        native_unit_of_measurement="s",
+    ),
+    NumberEntityDescription(
+        key=TRANSITION_CROSS_DURATION,
+        translation_key=TRANSITION_CROSS_DURATION,
         entity_category=EntityCategory.CONFIG,
         native_min_value=0,
         native_max_value=300,
@@ -91,5 +104,7 @@ class LIFXTransitionDurationNumber(LIFXEntity, RestoreNumber):
         assert value is not None
         if self.entity_description.key == TRANSITION_ON_DURATION:
             self.coordinator.transition_on_duration = value
-        else:
+        elif self.entity_description.key == TRANSITION_OFF_DURATION:
             self.coordinator.transition_off_duration = value
+        else:
+            self.coordinator.transition_cross_duration = value

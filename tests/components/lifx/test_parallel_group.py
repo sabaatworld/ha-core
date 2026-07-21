@@ -8,7 +8,11 @@ import pytest
 from homeassistant.components.lifx.const import CONF_GROUP_ID, DOMAIN
 from homeassistant.components.lifx.coordinator import LIFXUpdateCoordinator
 from homeassistant.components.lifx.manager import SERVICE_EFFECT_MOVE
-from homeassistant.components.lifx.parallel import ParallelCommand
+from homeassistant.components.lifx.parallel import (
+    ParallelCommand,
+    ParallelDispatchOutcome,
+    ParallelDispatchResult,
+)
 from homeassistant.components.lifx.parallel_group import (
     LIFXParallelGroupRuntime,
     _MemberCommandState,
@@ -17,7 +21,6 @@ from homeassistant.components.lifx.parallel_group import (
 )
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
 
 from . import _mocked_bulb
 
@@ -32,6 +35,7 @@ def _member(ip_address: str, *, last_update_success: bool = True) -> MagicMock:
     coordinator.last_update_success = last_update_success
     coordinator.transition_on_duration = 0
     coordinator.transition_off_duration = 0
+    coordinator.transition_cross_duration = 0
     coordinator.virtual_off = False
     coordinator.resume_hsbk = None
     coordinator.async_record_virtual_off = MagicMock(
@@ -61,7 +65,13 @@ def _runtime(
     )
     runtime = LIFXParallelGroupRuntime(hass, entry, member_entries, members)
     runtime.parallel = MagicMock()
-    runtime.parallel.async_dispatch = AsyncMock()
+    runtime.parallel.async_dispatch = AsyncMock(
+        return_value=ParallelDispatchResult(ParallelDispatchOutcome.COMPLETED, 1)
+    )
+    runtime.parallel.async_cancel_health = AsyncMock()
+    runtime.parallel.async_request_reconnect = AsyncMock(
+        return_value=ParallelDispatchResult(ParallelDispatchOutcome.COMPLETED, 1)
+    )
     return runtime, members
 
 
@@ -116,10 +126,10 @@ async def test_setup_retries_until_every_physical_member_is_ready(
     async_start.assert_not_awaited()
 
 
-async def test_group_availability_tracks_only_physical_dependencies(
+async def test_group_availability_tracks_physical_and_keepalive_health(
     hass: HomeAssistant,
 ) -> None:
-    """A worker fault cannot make an otherwise healthy Device Group unavailable."""
+    """A failed member health check also makes a Device Group unavailable."""
     runtime, members = _runtime(hass)
     runtime.parallel.available = False
 
@@ -130,6 +140,140 @@ async def test_group_availability_tracks_only_physical_dependencies(
 
     members[1].last_update_success = True
     assert runtime.available
+
+    runtime._keepalive_healthy[0] = False
+    assert not runtime.available
+
+
+async def test_first_idle_echo_failure_reconnects_but_keeps_group_available(
+    hass: HomeAssistant,
+) -> None:
+    """One missed Echo repairs the worker without changing Group availability."""
+    runtime, _members = _runtime(hass)
+    runtime.parallel.async_keepalive = AsyncMock(
+        return_value=ParallelDispatchResult(
+            ParallelDispatchOutcome.COMPLETED, 1, frozenset({1})
+        )
+    )
+    runtime.parallel.async_request_reconnect = AsyncMock(
+        return_value=ParallelDispatchResult(ParallelDispatchOutcome.COMPLETED, 1)
+    )
+
+    await runtime._async_run_keepalive(runtime._keepalive_generation)
+
+    assert runtime.available
+    assert runtime._keepalive_failures == [0, 1]
+    runtime.parallel.async_request_reconnect.assert_awaited_once_with(1, "192.0.2.2")
+
+
+async def test_second_idle_echo_failure_makes_group_unavailable(
+    hass: HomeAssistant,
+) -> None:
+    """Two missed Echoes from one member gate Group availability."""
+    runtime, _members = _runtime(hass)
+    runtime.parallel.async_keepalive = AsyncMock(
+        return_value=ParallelDispatchResult(
+            ParallelDispatchOutcome.COMPLETED, 1, frozenset({0})
+        )
+    )
+    runtime.parallel.async_request_reconnect = AsyncMock(
+        return_value=ParallelDispatchResult(ParallelDispatchOutcome.FAILED, 1)
+    )
+
+    await runtime._async_run_keepalive(runtime._keepalive_generation)
+    await runtime._async_run_keepalive(runtime._keepalive_generation)
+
+    assert not runtime.available
+    assert runtime._keepalive_healthy == [False, True]
+
+
+async def test_member_reload_replaces_only_its_coordinator_and_reconnects_worker(
+    hass: HomeAssistant,
+) -> None:
+    """A physical reload replaces only its Device Group member binding."""
+    runtime, _members = _runtime(hass)
+    replacement = _member("192.0.2.99")
+    runtime.parallel.async_request_reconnect = AsyncMock(
+        return_value=ParallelDispatchResult(ParallelDispatchOutcome.COMPLETED, 1)
+    )
+    runtime.member_entries[0].runtime_data = replacement
+    runtime.member_entries[0].state = ConfigEntryState.LOADED
+
+    runtime.async_member_entry_state_changed(0)
+    await hass.async_block_till_done()
+
+    assert runtime.members[0] is replacement
+    runtime.parallel.async_request_reconnect.assert_awaited_once_with(0, "192.0.2.99")
+
+
+async def test_member_reload_stays_unavailable_until_worker_reconnects(
+    hass: HomeAssistant,
+) -> None:
+    """A Group must not dispatch to the previous endpoint during handoff."""
+    runtime, _members = _runtime(hass)
+    replacement = _member("192.0.2.99")
+    reconnect_started = asyncio.Event()
+    release_reconnect = asyncio.Event()
+
+    async def _async_request_reconnect(
+        index: int, host: str
+    ) -> ParallelDispatchResult:
+        assert (index, host) == (0, "192.0.2.99")
+        reconnect_started.set()
+        await release_reconnect.wait()
+        return ParallelDispatchResult(ParallelDispatchOutcome.COMPLETED, 1)
+
+    runtime.parallel.async_request_reconnect = AsyncMock(
+        side_effect=_async_request_reconnect
+    )
+    runtime.member_entries[0].runtime_data = replacement
+    runtime.member_entries[0].state = ConfigEntryState.LOADED
+
+    runtime.async_member_entry_state_changed(0)
+    await reconnect_started.wait()
+
+    assert not runtime.available
+
+    release_reconnect.set()
+    await hass.async_block_till_done()
+
+    assert runtime.available
+
+
+async def test_member_unload_makes_group_unavailable_without_stopping_workers(
+    hass: HomeAssistant,
+) -> None:
+    """A physical reload must not stop unaffected Group workers."""
+    runtime, _members = _runtime(hass)
+    runtime.member_entries[0].state = ConfigEntryState.UNLOAD_IN_PROGRESS
+
+    runtime.async_member_entry_state_changed(0)
+
+    assert not runtime.available
+    runtime.parallel.async_stop.assert_not_called()
+
+
+async def test_group_cross_fade_zero_inherits_each_member(
+    hass: HomeAssistant,
+) -> None:
+    """A zero Group Cross Fade setting inherits the member settings."""
+    runtime, members = _runtime(hass)
+    members[0].transition_cross_duration = 0.4
+    members[1].transition_cross_duration = 0.8
+
+    assert runtime._transition_ms(members[0], "cross", {}) == 400
+    assert runtime._transition_ms(members[1], "cross", {}) == 800
+
+
+async def test_group_cross_fade_overrides_each_member(hass: HomeAssistant) -> None:
+    """A non-zero Group Cross Fade setting overrides member settings."""
+    runtime, members = _runtime(hass)
+    runtime.transition_cross_duration = 1.2
+    members[0].transition_cross_duration = 0.4
+    members[1].transition_cross_duration = 0.8
+
+    assert runtime._transition_ms(members[0], "cross", {}) == 1200
+    assert runtime._transition_ms(members[1], "cross", {}) == 1200
 
 
 async def test_dispatch_does_not_schedule_a_physical_refresh(
@@ -181,30 +325,42 @@ async def test_optimistic_group_state_expires_without_mutating_members(
     assert tuple(member.device.power_level for member in members) == member_power_levels
 
 
-async def test_dispatch_timeout_does_not_change_dependency_availability(
+async def test_dispatch_failure_is_silent_and_clears_the_projection(
     hass: HomeAssistant,
 ) -> None:
-    """A worker timeout fails only the command and leaves the group retryable."""
+    """A failed Group request clears optimism without raising a service error."""
     runtime, members = _runtime(hass)
     runtime.parallel.async_dispatch = AsyncMock(
-        side_effect=HomeAssistantError("timeout")
+        return_value=ParallelDispatchResult(ParallelDispatchOutcome.FAILED, 1)
     )
     states = tuple(
         _MemberCommandState(tuple(member.device.color), member.device.power_level)
         for member in members
     )
 
-    with pytest.raises(HomeAssistantError, match="timeout"):
-        await runtime._async_dispatch_projected_states(
-            tuple(ParallelCommand("power", (False, 0)) for _member in members),
-            states,
-        )
+    await runtime._async_dispatch_projected_states(
+        tuple(ParallelCommand("power", (False, 0)) for _member in members),
+        states,
+    )
     await hass.async_block_till_done()
 
     assert runtime.available
+    assert runtime._optimistic_state is None
     assert runtime._recovery_task is None
     for member in members:
         member.async_schedule_post_command_refresh.assert_not_awaited()
+
+
+async def test_unavailable_group_state_request_is_a_silent_noop(
+    hass: HomeAssistant,
+) -> None:
+    """The unavailable entity state replaces a frontend command-error toast."""
+    runtime, _members = _runtime(hass)
+    runtime._keepalive_healthy[0] = False
+
+    await runtime.async_set_state(power=True)
+
+    runtime.parallel.async_dispatch.assert_not_awaited()
 
 
 async def test_latest_projection_wins_after_a_newer_group_request(
@@ -306,6 +462,22 @@ async def test_displayed_on_state_sends_one_virtual_off_color_for_every_member(
     assert all(command.kind == "color" for command in commands)
     assert all(command.second is None for command in commands)
     assert all(command.payload[2] == 0 for command in commands)
+
+
+async def test_displayed_on_color_change_uses_cross_fade_for_every_member(
+    hass: HomeAssistant,
+) -> None:
+    """One displayed-on color update uses the Group Cross Fade setting."""
+    runtime, members = _runtime(hass)
+    runtime.transition_on_duration = 1.5
+    runtime.transition_cross_duration = 0.9
+    for member in members:
+        member.device.power_level = 65535
+
+    await runtime.async_set_state(brightness=128)
+
+    commands = runtime.parallel.async_dispatch.await_args.args[0]
+    assert all(command.payload[-1] == 900 for command in commands)
 
 
 async def test_group_power_off_sends_brightness_zero_but_displays_off(

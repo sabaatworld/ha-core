@@ -58,6 +58,9 @@
       },
       "transition_off_duration": {
         "name": "Fade Off Time"
+      },
+      "transition_cross_duration": {
+        "name": "Cross Fade Time"
       }
     },
     "select": {

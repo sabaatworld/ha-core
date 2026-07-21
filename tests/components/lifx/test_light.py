@@ -1997,14 +1997,23 @@ async def test_transition_duration_numbers(hass: HomeAssistant) -> None:
         },
         blocking=True,
     )
+    await hass.services.async_call(
+        NUMBER_DOMAIN,
+        SERVICE_SET_VALUE,
+        {
+            ATTR_ENTITY_ID: "number.my_group_my_bulb_cross_fade_time",
+            ATTR_VALUE: 0.9,
+        },
+        blocking=True,
+    )
 
     await hass.services.async_call(
-        LIGHT_DOMAIN,
-        "turn_on",
+        DOMAIN,
+        "set_state",
         {ATTR_ENTITY_ID: entity_id, ATTR_BRIGHTNESS: 100},
         blocking=True,
     )
-    assert bulb.set_waveform_optional.calls[-1][1]["value"]["period"] == 1500
+    assert bulb.set_waveform_optional.calls[-1][1]["value"]["period"] == 900
     bulb.set_waveform_optional.reset_mock()
 
     await hass.services.async_call(

@@ -109,6 +109,7 @@ class LIFXUpdateCoordinator(DataUpdateCoordinator[None]):
         self.last_used_theme: str = ""
         self.transition_on_duration: float = 0.0
         self.transition_off_duration: float = 0.0
+        self.transition_cross_duration: float = 0.0
         self._postponed_refresh: CALLBACK_TYPE | None = None
         self._post_command_generation = 0
         self.virtual_off = False

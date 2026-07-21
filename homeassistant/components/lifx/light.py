@@ -218,6 +218,21 @@ class LIFXLight(LIFXEntity, LightEntity, RestoreEntity):
         """Turn the light off."""
         await self.set_state(**{**kwargs, ATTR_POWER: False})
 
+    def _default_transition_duration(
+        self,
+        power_on: bool,
+        physical_power_off: bool,
+        hsbk: list[float | int | None] | None,
+    ) -> float:
+        """Return the configured duration for a state request."""
+        if physical_power_off:
+            return self.coordinator.transition_off_duration
+        if self.coordinator.virtual_off or power_on:
+            return self.coordinator.transition_on_duration
+        if hsbk:
+            return self.coordinator.transition_cross_duration
+        return self.coordinator.transition_on_duration
+
     async def set_state(self, **kwargs: Any) -> None:
         """Set a color on the light and turn it on/off."""
         self.coordinator.async_set_updated_data(None)
@@ -260,19 +275,16 @@ class LIFXLight(LIFXEntity, LightEntity, RestoreEntity):
         power_on = kwargs.get(ATTR_POWER, False)
         power_off = not kwargs.get(ATTR_POWER, True)
         physical_power_off = kwargs.get(ATTR_POWER) is False
+        hsbk = find_hsbk(self.hass, **kwargs)
 
         has_transition = ATTR_TRANSITION in kwargs
         if has_transition:
             fade = int(kwargs[ATTR_TRANSITION] * 1000)
         else:
-            default_transition = (
-                self.coordinator.transition_off_duration
-                if power_off
-                else self.coordinator.transition_on_duration
+            fade = int(
+                self._default_transition_duration(power_on, physical_power_off, hsbk)
+                * 1000
             )
-            fade = int(default_transition * 1000)
-
-        hsbk = find_hsbk(self.hass, **kwargs)
 
         if (
             power_on

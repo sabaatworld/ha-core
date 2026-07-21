@@ -54,6 +54,13 @@ async def test_transition_duration_numbers(hass: HomeAssistant) -> None:
         ]
         == "My Bulb Fade Off Time"
     )
+    assert hass.states.get("number.my_group_my_bulb_cross_fade_time").state == "0.0"
+    assert (
+        hass.states.get("number.my_group_my_bulb_cross_fade_time").attributes[
+            ATTR_FRIENDLY_NAME
+        ]
+        == "My Bulb Cross Fade Time"
+    )
 
     await hass.services.async_call(
         NUMBER_DOMAIN,
@@ -64,12 +71,25 @@ async def test_transition_duration_numbers(hass: HomeAssistant) -> None:
 
     assert hass.states.get(entity_id).state == "1.5"
     assert config_entry.runtime_data.transition_on_duration == 1.5
+
+    await hass.services.async_call(
+        NUMBER_DOMAIN,
+        SERVICE_SET_VALUE,
+        {
+            ATTR_ENTITY_ID: "number.my_group_my_bulb_cross_fade_time",
+            ATTR_VALUE: 0.9,
+        },
+        blocking=True,
+    )
+
+    assert hass.states.get("number.my_group_my_bulb_cross_fade_time").state == "0.9"
+    assert config_entry.runtime_data.transition_cross_duration == 0.9
     assert not bulb.set_power.calls
 
 
 async def test_transition_duration_number_restores_value(hass: HomeAssistant) -> None:
     """Test a transition duration number restores its native value."""
-    entity_id = "number.my_group_my_bulb_fade_off_time"
+    entity_id = "number.my_group_my_bulb_cross_fade_time"
     mock_restore_cache_with_extra_data(
         hass,
         (
@@ -93,4 +113,4 @@ async def test_transition_duration_number_restores_value(hass: HomeAssistant) ->
         await hass.async_block_till_done()
 
     assert hass.states.get(entity_id).state == "2.5"
-    assert config_entry.runtime_data.transition_off_duration == 2.5
+    assert config_entry.runtime_data.transition_cross_duration == 2.5

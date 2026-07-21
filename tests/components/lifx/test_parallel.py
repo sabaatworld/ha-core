@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from homeassistant.components.lifx import parallel
 from homeassistant.components.lifx.parallel import (
     ACKNOWLEDGEMENT,
     HEADER,
@@ -14,7 +15,6 @@ from homeassistant.components.lifx.parallel import (
     SET_POWER,
     LIFXParallelRuntime,
     ParallelCommand,
-    _command_summary,
     _dispatch_prepared,
     _DispatchRequest,
     _header,
@@ -35,6 +35,78 @@ def test_set_power_does_not_request_an_ack() -> None:
     assert packet_type == SET_POWER
     assert flags & 0b10 == 0
     assert len(packet) == HEADER.size + struct.calcsize("<HI")
+
+
+def test_echo_request_uses_the_lifx_online_check_packet() -> None:
+    """An idle Group health check uses the LIFX EchoRequest packet."""
+    assert parallel.ECHO_REQUEST == 58
+    assert parallel.ECHO_RESPONSE == 59
+
+
+def test_echo_request_carries_an_opaque_64_byte_token() -> None:
+    """An EchoResponse can only satisfy the matching worker request."""
+    token = bytes(range(64))
+
+    packet = parallel._echo_request(1, 2, bytes(8), token)
+    _size, _frame, _source, _target, _reserved, flags, _sequence, _r2, packet_type, _r3 = (
+        HEADER.unpack_from(packet)
+    )
+
+    assert packet_type == parallel.ECHO_REQUEST
+    assert flags & 0b10 == 0
+    assert packet[HEADER.size :] == token
+
+
+def test_wait_for_echo_requires_the_matching_response_payload() -> None:
+    """Stale or wrong EchoResponse payloads cannot satisfy a health check."""
+    target = bytes((1,)) * 8
+    token = bytes(range(64))
+    udp = MagicMock()
+    pipe = MagicMock()
+    pipe.poll.return_value = False
+    udp.recv.side_effect = (
+        parallel._header(parallel.ECHO_RESPONSE, 1, 2, target, 64) + bytes(64),
+        parallel._header(parallel.ECHO_RESPONSE, 1, 2, target, 64) + token,
+    )
+
+    assert parallel._wait_for_echo(
+        udp,
+        pipe,
+        1,
+        target,
+        2,
+        token,
+        3,
+        0,
+        0,
+        SimpleNamespace(value=3),
+        time.monotonic() + 1,
+    )
+
+
+def test_reconnect_preflight_abandons_a_superseded_health_generation() -> None:
+    """A normal command never waits for a health reconnect's service response."""
+    udp = MagicMock()
+    pipe = MagicMock()
+    generation = SimpleNamespace(value=2)
+
+    assert (
+        parallel._preflight(
+            udp,
+            1,
+            lambda: 2,
+            pipe=pipe,
+            current_generation=generation,
+            request_id=1,
+        )
+        is None
+    )
+    udp.recv.assert_not_called()
+
+
+def test_parallel_runtime_exposes_a_non_exceptional_dispatch_outcome() -> None:
+    """Operational Device Group outcomes are values, not service exceptions."""
+    assert parallel.ParallelDispatchOutcome.COMPLETED.value
 
 
 def test_single_command_stage_requires_an_ack() -> None:
@@ -120,6 +192,9 @@ def test_new_request_cancels_active_ack_wait_without_waiting_for_cleanup() -> No
 
     assert runtime._current_generation.value == 2
     old_request.done.set.assert_called_once()
+    assert old_request.result == parallel.ParallelDispatchResult(
+        parallel.ParallelDispatchOutcome.SUPERSEDED, 1
+    )
     worker.pipe.send.assert_called_once_with(("CANCEL", 1, 0))
 
 
@@ -155,19 +230,6 @@ def test_command_stages_preserve_member_dependency_order() -> None:
     )
 
     assert tuple(stage.kind for stage in command.stages) == ("power", "color")
-
-
-def test_command_summary_includes_each_staged_command_and_payload() -> None:
-    """Debug output must identify the exact requested staged work."""
-    command = ParallelCommand(
-        "power",
-        (True, 100),
-        ParallelCommand("color", (1, 2, 3, 3500, 0)),
-    )
-
-    assert _command_summary(command) == (
-        "power payload=(True, 100) -> color payload=(1, 2, 3, 3500, 0)"
-    )
 
 
 def test_wait_for_ack_ignores_malformed_response_and_matches_sequence() -> None:
