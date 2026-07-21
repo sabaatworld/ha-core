@@ -30,9 +30,9 @@
 **Interfaces:**
 - Produces: a source integration whose display name is `LIFX Ultimate` while `DOMAIN` remains `lifx`.
 
-- [ ] Move the LIFX development instructions to `docs/lifx/AGENTS.md` without changing their operational constraints.
-- [ ] Change only the source manifest `name` to `LIFX Ultimate`; retain `domain` and the local development `version`.
-- [ ] Verify no development instruction file remains in the runtime source directory.
+- [x] Move the LIFX development instructions to `docs/lifx/AGENTS.md` without changing their operational constraints.
+- [x] Change only the source manifest `name` to `LIFX Ultimate`; retain `domain` and the local development `version`.
+- [x] Verify no development instruction file remains in the runtime source directory.
 
 ### Task 2: Test the HACS exporter
 
@@ -44,10 +44,10 @@
 - Consumes: `--source`, `--destination`, `--version`, and `--source-revision` command-line arguments.
 - Produces: `custom_components/lifx/` containing runtime files and `translations/en.json`, plus HACS repository metadata.
 
-- [ ] Write a failing subprocess test with a temporary source directory that asserts the exporter omits `AGENTS.md` and `strings.json`, writes `hacs.json` and README files, and rewrites the exported manifest to the supplied version/name.
-- [ ] Run the focused test and confirm it fails because the exporter does not exist.
-- [ ] Implement the exporter using `pathlib`, `shutil`, and `json`; fail clearly if the English translation file is absent.
-- [ ] Run the focused test and confirm the HACS layout is complete and no source-only files are copied.
+- [x] Write a failing subprocess test with a temporary source directory that asserts the exporter omits `AGENTS.md` and `strings.json`, writes `hacs.json` and README files, and rewrites the exported manifest to the supplied version/name.
+- [x] Run the focused test and confirm it fails because the exporter does not exist.
+- [x] Implement the exporter using `pathlib`, `shutil`, and `json`; fail clearly if the English translation file is absent.
+- [x] Run the focused test and confirm the HACS layout is complete and no source-only files are copied.
 
 ### Task 3: Publish on source updates
 
@@ -58,10 +58,10 @@
 - Consumes: `secrets.LIFX_ULTIMATE_PUBLISH_KEY`, `github.run_number`, and the checked-out source revision.
 - Produces: an idempotent commit to `sabaatworld/ha-lifx-ultimate` only when an export changes.
 
-- [ ] Check out this source repository and the target HACS repository at `main`.
-- [ ] Run the exporter with `0.0.${{ github.run_number }}` so every publication has a valid, monotonically increasing SemVer manifest version.
-- [ ] Commit the generated HACS layout with the source revision in the commit message and push it only when the target worktree differs.
-- [ ] Restrict workflow permissions to source read; use the explicitly scoped target-repository token solely for the second checkout/push.
+- [x] Check out this source repository and the target HACS repository at `main`.
+- [x] Run the exporter with `0.0.${{ github.run_number }}` so every publication has a valid, monotonically increasing SemVer manifest version.
+- [x] Commit the generated HACS layout with the source revision in the commit message and push it only when the target worktree differs.
+- [x] Restrict workflow permissions to source read; use the explicitly scoped target-repository token solely for the second checkout/push.
 
 ### Task 4: Create and validate the HACS repository
 
@@ -72,17 +72,17 @@
 **Interfaces:**
 - Produces: a public HACS custom repository with a root `hacs.json`, `README.md`, HACS validation workflow, and one `custom_components/lifx` directory.
 
-- [ ] Create the public repository with issues enabled and a concise description.
-- [ ] Run the exporter locally to create the initial distribution commit and push it from the requested local checkout.
-- [ ] Add `LIFX_ULTIMATE_PUBLISH_KEY` to the source repository as the private half of a write-enabled deploy key attached only to the target repository.
-- [ ] Trigger and inspect the source publication workflow.
-- [ ] Export the official Home Assistant Brands LIFX icon and a root Apache-2.0 license; add the HACS repository topics required by validation.
+- [x] Create the public repository with issues enabled and a concise description.
+- [x] Run the exporter locally to create the initial distribution commit and push it from the requested local checkout.
+- [x] Add `LIFX_ULTIMATE_PUBLISH_KEY` to the source repository as the private half of a write-enabled deploy key attached only to the target repository.
+- [x] Trigger and inspect the source publication workflow.
+- [x] Export the official Home Assistant Brands LIFX icon and a root Apache-2.0 license; add the HACS repository topics required by validation.
 
 ### Task 5: Verify the source and exported repositories
 
 **Files:**
 - Test: `tests/components/lifx/test_hacs_export.py`
 
-- [ ] Run the focused exporter test and the LIFX test suite on the Home Assistant host.
-- [ ] Run Ruff and `git diff --check` on the Home Assistant host.
-- [ ] Inspect the remote target tree and manifest to confirm `custom_components/lifx`, `LIFX Ultimate`, `domain: lifx`, an incremented version, and `translations/en.json` are present.
+- [x] Run the focused exporter test and the LIFX test suite on the Home Assistant host.
+- [x] Run Ruff and `git diff --check` on the Home Assistant host.
+- [x] Inspect the remote target tree and manifest to confirm `custom_components/lifx`, `LIFX Ultimate`, `domain: lifx`, an incremented version, and `translations/en.json` are present.
