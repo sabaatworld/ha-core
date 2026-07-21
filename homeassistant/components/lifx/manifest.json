@@ -1,6 +1,6 @@
 {
   "domain": "lifx",
-  "name": "LIFX Custom",
+  "name": "LIFX Ultimate",
   "version": "2026.7.2-custom",
   "codeowners": ["@Djelibeybi"],
   "config_flow": true,

@@ -2,22 +2,24 @@
 
 ## Purpose
 
-This directory is the development copy of Home Assistant's built-in `lifx`
-integration. It is intentionally loaded as a custom integration on the Home
-Assistant appliance so local changes override the packaged integration.
+This directory contains development instructions for the customized built-in
+`lifx` integration. The component is intentionally loaded as a custom
+integration on the Home Assistant appliance so local changes override the
+packaged integration.
 
-Keep this a drop-in replacement:
+Keep the integration a drop-in replacement:
 
 - The integration domain must remain `lifx` in `const.py` and `manifest.json`.
 - Do not rename the component directory or create a second domain such as
-  `lifx-ultimate`; the existing config entries use the `lifx` domain.
-- `manifest.json` must retain a custom-integration `version` field. The name
-  may identify this as the custom build, but the domain must stay `lifx`.
+  `lifx-ultimate`; existing config entries use the `lifx` domain.
+- The component `name` may be `LIFX Ultimate`, but its technical domain stays
+  `lifx`.
+- `manifest.json` must retain a custom-integration `version` field.
 
 ## Paths and machines
 
 Development happens on the MacBook. The Home Assistant configuration share is
-mounted locally, so edit the files in this directory directly:
+mounted locally, so edit the integration source directly:
 
 ```text
 MacBook source:       /Volumes/config/workplace/ha-core/homeassistant/components/lifx
@@ -62,8 +64,8 @@ and test conventions.
 
 ## Deploy and verify on Home Assistant
 
-Run Git staging, commits, and pushes from the Home Assistant host, not the mounted
-macOS checkout:
+Run Git staging, commits, and pushes from the Home Assistant host, not the
+mounted macOS checkout:
 
 ```sh
 ssh root@192.168.8.28 'cd /config/workplace/ha-core && git status --short'
