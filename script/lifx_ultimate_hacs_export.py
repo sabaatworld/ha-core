@@ -12,6 +12,7 @@ INTEGRATION_NAME = "LIFX Ultimate"
 REPOSITORY = "sabaatworld/ha-lifx-ultimate"
 SOURCE_REPOSITORY = "sabaatworld/ha-core"
 EXCLUDED_SOURCE_FILES = {"AGENTS.md", "strings.json"}
+ASSETS_DIRECTORY = Path(__file__).with_name("lifx_ultimate_hacs_assets")
 
 
 def _parse_arguments() -> argparse.Namespace:
@@ -131,6 +132,7 @@ def export_distribution(
     )
     _write_json(manifest_path, manifest)
     _write_json(destination / "hacs.json", {"name": INTEGRATION_NAME})
+    shutil.copyfile(ASSETS_DIRECTORY / "LICENSE", destination / "LICENSE")
     _write_readme(destination, source_revision, version)
     _write_validation_workflow(destination)
 

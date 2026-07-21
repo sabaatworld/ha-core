@@ -76,6 +76,7 @@
 - [ ] Run the exporter locally to create the initial distribution commit and push it from the requested local checkout.
 - [ ] Add `LIFX_ULTIMATE_PUBLISH_KEY` to the source repository as the private half of a write-enabled deploy key attached only to the target repository.
 - [ ] Trigger and inspect the source publication workflow.
+- [ ] Export the official Home Assistant Brands LIFX icon and a root Apache-2.0 license; add the HACS repository topics required by validation.
 
 ### Task 5: Verify the source and exported repositories
 

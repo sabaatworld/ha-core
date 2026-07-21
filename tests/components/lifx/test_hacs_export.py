@@ -30,6 +30,9 @@ def test_export_creates_hacs_layout_without_core_only_files(tmp_path: Path) -> N
     translations = source / "translations"
     translations.mkdir()
     (translations / "en.json").write_text('{"config": {}}\n')
+    brand = source / "brand"
+    brand.mkdir()
+    (brand / "icon.png").write_bytes(b"official-lifx-brand")
     destination = tmp_path / "distribution"
     git_directory = destination / ".git"
     git_directory.mkdir(parents=True)
@@ -60,6 +63,7 @@ def test_export_creates_hacs_layout_without_core_only_files(tmp_path: Path) -> N
     assert (integration / "__init__.py").is_file()
     assert (integration / "light.py").is_file()
     assert (integration / "translations" / "en.json").is_file()
+    assert (integration / "brand" / "icon.png").is_file()
     assert git_metadata.read_text() == "ref: refs/heads/main\n"
     assert not (integration / "AGENTS.md").exists()
     assert not (integration / "strings.json").exists()
@@ -72,3 +76,4 @@ def test_export_creates_hacs_layout_without_core_only_files(tmp_path: Path) -> N
     assert manifest["version"] == "0.0.123"
     assert manifest["issue_tracker"] == "https://github.com/sabaatworld/ha-lifx-ultimate/issues"
     assert "abc1234" in (destination / "README.md").read_text()
+    assert (destination / "LICENSE").read_text().lstrip().startswith("Apache License")
