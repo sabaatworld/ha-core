@@ -31,7 +31,6 @@ jobs:
           ref: main
           repository: sabaatworld/ha-lifx-ultimate
           ssh-key: ${{ secrets.LIFX_ULTIMATE_PUBLISH_KEY }}
-          persist-credentials: false
 
       - name: Export LIFX Ultimate
         run: >-
