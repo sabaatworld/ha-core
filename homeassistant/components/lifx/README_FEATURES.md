@@ -1,13 +1,13 @@
 ## ✨ Why LIFX Ultimate?
 
-I love LIFX lights. They are comparatively affordable, and their colour output
-is exceptionally bright—even alongside premium alternatives such as Philips
-Hue. Home Assistant is how I control every LIFX light in my home, but two
-frustrations kept getting in the way:
+I love LIFX lights. They are comparatively affordable, and I find their
+colours brighter and more vibrant than Philips Hue. Home Assistant is how I
+control every LIFX light in my home, but two frustrations always kept getting
+in the way:
 
-1. My lights are arranged in real-world groups, such as Tree Lamps, and often
-   controlled by one remote. It was frustrating when lights in the same group
-   did not turn on, turn off, or transition at the same time.
+1. My lights are arranged into groups, such as Tree Lamps, and often controlled
+   by one remote. It was frustrating when lights in the same group did not turn
+   on, turn off, or transition at the same time.
 2. LIFX supported transition durations for direct on and off operations, but
    not convenient default fades for general state changes. That meant adding a
    transition to every automation—and some integrations offered no way to do
@@ -15,13 +15,6 @@ frustrations kept getting in the way:
 
 LIFX Ultimate is the solution: reliable, synchronised Device Groups and
 configurable fade defaults for the way Home Assistant is actually used.
-
-## ✅ Backward compatible
-
-LIFX Ultimate deliberately keeps Home Assistant's technical `lifx` domain.
-Your existing LIFX configuration entries, entities, automations, scenes, and
-normal Home Assistant LIFX controls continue to work. Install it through HACS
-to replace the built-in integration with these additional capabilities.
 
 ## 🎯 Device Groups
 
@@ -40,20 +33,25 @@ dependent multi-command operations that wait for acknowledgements before the
 next synchronised stage. The exact moment each bulb visibly changes can still
 vary with its firmware, Wi-Fi, and internal rendering.
 
+> [!WARNING]
+> Turning a Device Group off uses **virtual off**: its members are set to zero
+> brightness instead of having their power cut. They remain powered, consume
+> marginally more energy than normal standby, and appear as on at zero
+> brightness in the LIFX app. Home Assistant presents the group as off.
+
 ## 🌈 Fade and transition defaults
 
 Every physical LIFX light and Device Group has three configurable Number
 entities, in seconds:
 
-- **Fade On Time** — used when the light turns on or leaves its virtual-off
-  state.
+- **Fade On Time** — used when the light turns on.
 - **Fade Off Time** — used when the light turns off.
 - **Cross Fade Time** — used when an already-on light changes colour or
   brightness without turning on or off.
 
-Set any value from 0 to 300 seconds in the entity's configuration controls. A
-value of `0` means “do not override”; it falls through to the next applicable
-default, or produces an immediate change when none is configured.
+Set a non-zero value to use a default fade. A value of `0` means “do not
+override”; it falls through to the next applicable default, or produces an
+immediate change when none is configured.
 
 ## 📐 Transition priority
 
