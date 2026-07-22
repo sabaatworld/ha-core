@@ -89,6 +89,7 @@ def test_export_creates_hacs_layout_without_core_only_files(tmp_path: Path) -> N
     assert '"*-v0.0.*"' in release_workflow
     assert "contents: write" in release_workflow
     assert 'gh release create "$GITHUB_REF_NAME" --generate-notes' in release_workflow
+    assert "--repo sabaatworld/ha-lifx-ultimate" in release_workflow
 
 
 def test_export_derives_version_from_source_manifest(tmp_path: Path) -> None:

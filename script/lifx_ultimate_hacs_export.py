@@ -150,7 +150,7 @@ def _write_release_workflow(destination: Path) -> None:
         "    runs-on: ubuntu-latest\n"
         "    steps:\n"
         "      - name: Create GitHub Release\n"
-        "        run: gh release create \"$GITHUB_REF_NAME\" --generate-notes\n"
+        f"        run: gh release create \"$GITHUB_REF_NAME\" --generate-notes --repo {REPOSITORY}\n"
         "        env:\n"
         "          GH_TOKEN: ${{ github.token }}\n"
     )
