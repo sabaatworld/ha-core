@@ -20,6 +20,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       - name: Check out HACS distribution
         uses: actions/checkout@v5
@@ -29,6 +31,7 @@ jobs:
           ref: main
           repository: sabaatworld/ha-lifx-ultimate
           ssh-key: ${{ secrets.LIFX_ULTIMATE_PUBLISH_KEY }}
+          persist-credentials: false
 
       - name: Export LIFX Ultimate
         run: >-
@@ -40,6 +43,7 @@ jobs:
       - name: Commit updated distribution
         working-directory: distribution
         run: |
+          git remote set-url origin git@github.com:sabaatworld/ha-lifx-ultimate.git
           if git diff --quiet; then
             exit 0
           fi
