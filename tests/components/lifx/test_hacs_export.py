@@ -70,6 +70,8 @@ def test_export_creates_hacs_layout_without_core_only_files(tmp_path: Path) -> N
     assert not (integration / "README_FEATURES.md").exists()
     assert not (integration / "strings.json").exists()
     assert json.loads((destination / "hacs.json").read_text()) == {
+        "hide_default_branch": True,
+        "homeassistant": "2026.7.2",
         "name": "LIFX Ultimate"
     }
     manifest = json.loads((integration / "manifest.json").read_text())

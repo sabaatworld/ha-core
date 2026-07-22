@@ -43,13 +43,21 @@ def _read_json(path: Path) -> dict[str, object] | None:
     return value if isinstance(value, dict) else None
 
 
-def _next_version(source: Path, destination: Path, source_revision: str) -> str:
+def _source_version(source: Path) -> str:
+    """Return the source integration's Home Assistant version."""
     source_manifest = _read_json(source / "manifest.json")
     if source_manifest is None or not isinstance(
         source_version := source_manifest.get("version"), str
     ):
         msg = f"Missing required string version in source manifest: {source / 'manifest.json'}"
         raise ValueError(msg)
+    return source_version
+
+
+def _next_version(
+    source_version: str, destination: Path, source_revision: str
+) -> str:
+    """Return the next HACS release version for the source revision."""
 
     previous_metadata = _read_json(destination / PUBLISH_METADATA)
     if (
@@ -172,7 +180,8 @@ def export_distribution(
         msg = f"Missing required HACS feature guide: {feature_guide}"
         raise FileNotFoundError(msg)
 
-    version = _next_version(source, destination, source_revision)
+    source_version = _source_version(source)
+    version = _next_version(source_version, destination, source_revision)
     _clear_generated_content(destination)
     integration = destination / "custom_components" / DOMAIN
     integration.parent.mkdir(parents=True)
@@ -195,7 +204,14 @@ def export_distribution(
         }
     )
     _write_json(manifest_path, manifest)
-    _write_json(destination / "hacs.json", {"name": INTEGRATION_NAME})
+    _write_json(
+        destination / "hacs.json",
+        {
+            "hide_default_branch": True,
+            "homeassistant": source_version,
+            "name": INTEGRATION_NAME,
+        },
+    )
     _write_json(
         destination / PUBLISH_METADATA,
         {"source_revision": source_revision, "version": version},
