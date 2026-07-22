@@ -5,21 +5,23 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import re
 import shutil
 
 DOMAIN = "lifx"
 INTEGRATION_NAME = "LIFX Ultimate"
 REPOSITORY = "sabaatworld/ha-lifx-ultimate"
 SOURCE_REPOSITORY = "sabaatworld/ha-core"
-EXCLUDED_SOURCE_FILES = {"AGENTS.md", "strings.json"}
+EXCLUDED_SOURCE_FILES = {"AGENTS.md", "README_FEATURES.md", "strings.json"}
 ASSETS_DIRECTORY = Path(__file__).with_name("lifx_ultimate_hacs_assets")
+PUBLISH_METADATA = ".lifx-ultimate-publish.json"
+VERSION_SUFFIX = re.compile(r"(?:.*-)?v0\.0\.(\d+)$|0\.0\.(\d+)$")
 
 
 def _parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", required=True, type=Path)
     parser.add_argument("--destination", required=True, type=Path)
-    parser.add_argument("--version", required=True)
     parser.add_argument("--source-revision", required=True)
     return parser.parse_args()
 
@@ -34,8 +36,49 @@ def _write_json(path: Path, value: dict[str, object]) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
 
 
-def _write_readme(destination: Path, source_revision: str, version: str) -> None:
-    readme = "\n".join(
+def _read_json(path: Path) -> dict[str, object] | None:
+    if not path.is_file():
+        return None
+    value = json.loads(path.read_text())
+    return value if isinstance(value, dict) else None
+
+
+def _next_version(source: Path, destination: Path, source_revision: str) -> str:
+    source_manifest = _read_json(source / "manifest.json")
+    if source_manifest is None or not isinstance(
+        source_version := source_manifest.get("version"), str
+    ):
+        msg = f"Missing required string version in source manifest: {source / 'manifest.json'}"
+        raise ValueError(msg)
+
+    previous_metadata = _read_json(destination / PUBLISH_METADATA)
+    if (
+        previous_metadata is not None
+        and previous_metadata.get("source_revision") == source_revision
+        and isinstance(previous_version := previous_metadata.get("version"), str)
+    ):
+        return previous_version
+
+    previous_manifest = _read_json(
+        destination / "custom_components" / DOMAIN / "manifest.json"
+    )
+    previous_version = (
+        previous_manifest.get("version") if previous_manifest is not None else None
+    )
+    match = (
+        VERSION_SUFFIX.fullmatch(previous_version)
+        if isinstance(previous_version, str)
+        else None
+    )
+    counter = int(match.group(1) or match.group(2)) if match else 0
+    return f"{source_version}-v0.0.{counter + 1}"
+
+
+def _write_readme(
+    destination: Path, source_revision: str, version: str, features: str
+) -> None:
+    """Write the generated HACS introduction followed by source-owned features."""
+    header = "\n".join(
         (
             """# LIFX Ultimate
 
@@ -52,18 +95,12 @@ It intentionally keeps the technical domain `lifx`, so existing LIFX config
 entries are retained and this package overrides Home Assistant's built-in LIFX
 integration.
 
-## Updates
-
-This repository is generated automatically from
+## 📦 Automated publishing
 """,
-            f"[`{SOURCE_REPOSITORY}`](https://github.com/{SOURCE_REPOSITORY}) whenever its",
-            """LIFX source changes. HACS tracks normal commits; no manual release selection is
-required.""",
-            f"Generated from source revision `{source_revision}` as version `{version}`.",
-            "",
+            f"This package is generated from [`{SOURCE_REPOSITORY}`](https://github.com/{SOURCE_REPOSITORY}) at source revision `{source_revision}` and published as `{version}`. HACS uses the GitHub Release for each published version to offer updates.",
         )
     )
-    (destination / "README.md").write_text(readme)
+    (destination / "README.md").write_text(f"{header}\n{features.strip()}\n")
 
 
 def _write_validation_workflow(destination: Path) -> None:
@@ -89,6 +126,28 @@ def _write_validation_workflow(destination: Path) -> None:
     )
 
 
+def _write_release_workflow(destination: Path) -> None:
+    workflow = destination / ".github" / "workflows"
+    workflow.mkdir(parents=True, exist_ok=True)
+    (workflow / "release.yml").write_text(
+        "name: Release LIFX Ultimate\n\n"
+        "on:\n"
+        "  push:\n"
+        "    tags:\n"
+        "      - \"*-v0.0.*\"\n\n"
+        "permissions:\n"
+        "  contents: write\n\n"
+        "jobs:\n"
+        "  release:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - name: Create GitHub Release\n"
+        "        run: gh release create \"$GITHUB_REF_NAME\" --generate-notes\n"
+        "        env:\n"
+        "          GH_TOKEN: ${{ github.token }}\n"
+    )
+
+
 def _clear_generated_content(destination: Path) -> None:
     destination.mkdir(parents=True, exist_ok=True)
     for path in destination.iterdir():
@@ -101,14 +160,19 @@ def _clear_generated_content(destination: Path) -> None:
 
 
 def export_distribution(
-    source: Path, destination: Path, version: str, source_revision: str
-) -> None:
+    source: Path, destination: Path, source_revision: str
+) -> str:
     """Write one complete HACS custom-integration repository."""
     translation = source / "translations" / "en.json"
     if not translation.is_file():
         msg = f"Missing required custom-integration translation: {translation}"
         raise FileNotFoundError(msg)
+    feature_guide = source / "README_FEATURES.md"
+    if not feature_guide.is_file():
+        msg = f"Missing required HACS feature guide: {feature_guide}"
+        raise FileNotFoundError(msg)
 
+    version = _next_version(source, destination, source_revision)
     _clear_generated_content(destination)
     integration = destination / "custom_components" / DOMAIN
     integration.parent.mkdir(parents=True)
@@ -132,9 +196,15 @@ def export_distribution(
     )
     _write_json(manifest_path, manifest)
     _write_json(destination / "hacs.json", {"name": INTEGRATION_NAME})
+    _write_json(
+        destination / PUBLISH_METADATA,
+        {"source_revision": source_revision, "version": version},
+    )
     shutil.copyfile(ASSETS_DIRECTORY / "LICENSE", destination / "LICENSE")
-    _write_readme(destination, source_revision, version)
+    _write_readme(destination, source_revision, version, feature_guide.read_text())
     _write_validation_workflow(destination)
+    _write_release_workflow(destination)
+    return version
 
 
 def main() -> None:
@@ -143,7 +213,6 @@ def main() -> None:
     export_distribution(
         arguments.source,
         arguments.destination,
-        arguments.version,
         arguments.source_revision,
     )
 
