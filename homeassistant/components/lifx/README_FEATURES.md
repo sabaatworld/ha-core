@@ -37,7 +37,8 @@ vary with its firmware, Wi-Fi, and internal rendering.
 > Turning a Device Group off uses **virtual off**: its members are set to zero
 > brightness instead of having their power cut. They remain powered, consume
 > marginally more energy than normal standby, and appear as on at zero
-> brightness in the LIFX app. Home Assistant presents the group as off.
+> brightness in the LIFX app. Home Assistant presents the group and individual
+> lights as off.
 
 ## 🌈 Fade and transition defaults
 
