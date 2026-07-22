@@ -12,6 +12,7 @@ from homeassistant.components.lifx.parallel import (
     ParallelCommand,
     ParallelDispatchOutcome,
     ParallelDispatchResult,
+    ParallelTransport,
 )
 from homeassistant.components.lifx.parallel_group import (
     LIFXParallelGroupRuntime,
@@ -48,6 +49,11 @@ def _member(ip_address: str, *, last_update_success: bool = True) -> MagicMock:
     )
     coordinator.async_schedule_post_command_refresh = AsyncMock()
     return coordinator
+
+
+def _transport(host: str) -> ParallelTransport:
+    """Return the resolved physical transport used by a mock member."""
+    return ParallelTransport(host, 56700, b"\xaa\xbb\xcc\xdd\xee\xcc\x00\x00")
 
 
 def _runtime(
@@ -163,7 +169,9 @@ async def test_first_idle_echo_failure_reconnects_but_keeps_group_available(
 
     assert runtime.available
     assert runtime._keepalive_failures == [0, 1]
-    runtime.parallel.async_request_reconnect.assert_awaited_once_with(1, "192.0.2.2")
+    runtime.parallel.async_request_reconnect.assert_awaited_once_with(
+        1, _transport("192.0.2.2")
+    )
 
 
 async def test_second_idle_echo_failure_makes_group_unavailable(
@@ -203,7 +211,9 @@ async def test_member_reload_replaces_only_its_coordinator_and_reconnects_worker
     await hass.async_block_till_done()
 
     assert runtime.members[0] is replacement
-    runtime.parallel.async_request_reconnect.assert_awaited_once_with(0, "192.0.2.99")
+    runtime.parallel.async_request_reconnect.assert_awaited_once_with(
+        0, _transport("192.0.2.99")
+    )
 
 
 async def test_member_reload_stays_unavailable_until_worker_reconnects(
@@ -216,9 +226,9 @@ async def test_member_reload_stays_unavailable_until_worker_reconnects(
     release_reconnect = asyncio.Event()
 
     async def _async_request_reconnect(
-        index: int, host: str
+        index: int, transport: ParallelTransport
     ) -> ParallelDispatchResult:
-        assert (index, host) == (0, "192.0.2.99")
+        assert (index, transport) == (0, _transport("192.0.2.99"))
         reconnect_started.set()
         await release_reconnect.wait()
         return ParallelDispatchResult(ParallelDispatchOutcome.COMPLETED, 1)

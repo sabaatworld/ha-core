@@ -15,12 +15,14 @@ from homeassistant.components.lifx.parallel import (
     SET_POWER,
     LIFXParallelRuntime,
     ParallelCommand,
+    ParallelTransport,
     _dispatch_prepared,
     _DispatchRequest,
     _header,
     _set_color,
     _set_power,
     _wait_for_ack,
+    _worker,
 )
 from homeassistant.exceptions import HomeAssistantError
 
@@ -57,6 +59,29 @@ def test_echo_request_carries_an_opaque_64_byte_token() -> None:
     assert packet[HEADER.size :] == token
 
 
+def test_worker_starts_with_the_known_member_transport() -> None:
+    """A group worker must not rediscover an already loaded physical light."""
+    transport = ParallelTransport(
+        "192.0.2.1", 56700, b"\xaa\xbb\xcc\xdd\xee\xff\x00\x00"
+    )
+    udp = MagicMock()
+    pipe = MagicMock()
+    pipe.recv.return_value = ("SHUTDOWN",)
+
+    with patch("homeassistant.components.lifx.parallel.socket.socket", return_value=udp):
+        _worker(
+            transport,
+            1,
+            pipe,
+            SimpleNamespace(value=0),
+            MagicMock(),
+        )
+
+    udp.connect.assert_called_once_with((transport.host, transport.port))
+    udp.send.assert_not_called()
+    pipe.send.assert_called_once_with(("STARTED",))
+
+
 def test_wait_for_echo_requires_the_matching_response_payload() -> None:
     """Stale or wrong EchoResponse payloads cannot satisfy a health check."""
     target = bytes((1,)) * 8
@@ -82,26 +107,6 @@ def test_wait_for_echo_requires_the_matching_response_payload() -> None:
         SimpleNamespace(value=3),
         time.monotonic() + 1,
     )
-
-
-def test_reconnect_preflight_abandons_a_superseded_health_generation() -> None:
-    """A normal command never waits for a health reconnect's service response."""
-    udp = MagicMock()
-    pipe = MagicMock()
-    generation = SimpleNamespace(value=2)
-
-    assert (
-        parallel._preflight(
-            udp,
-            1,
-            lambda: 2,
-            pipe=pipe,
-            current_generation=generation,
-            request_id=1,
-        )
-        is None
-    )
-    udp.recv.assert_not_called()
 
 
 def test_parallel_runtime_exposes_a_non_exceptional_dispatch_outcome() -> None:
