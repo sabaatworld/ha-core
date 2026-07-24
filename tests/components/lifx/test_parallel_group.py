@@ -132,23 +132,37 @@ async def test_setup_retries_until_every_physical_member_is_ready(
     async_start.assert_not_awaited()
 
 
-async def test_group_availability_tracks_physical_and_keepalive_health(
+async def test_group_availability_requires_only_one_healthy_member(
     hass: HomeAssistant,
 ) -> None:
-    """A failed member health check also makes a Device Group unavailable."""
+    """One unavailable member must not make a healthy Device Group unavailable."""
     runtime, members = _runtime(hass)
     runtime.parallel.available = False
 
     assert runtime.available
 
     members[1].last_update_success = False
-    assert not runtime.available
+    assert runtime.available
 
     members[1].last_update_success = True
     assert runtime.available
 
     runtime._keepalive_healthy[0] = False
-    assert not runtime.available
+    assert runtime.available
+
+
+async def test_group_command_excludes_an_unavailable_member(
+    hass: HomeAssistant,
+) -> None:
+    """Group commands must not prepare packets for an unavailable member."""
+    runtime, members = _runtime(hass)
+    members[1].last_update_success = False
+
+    await runtime.async_set_state(power=True, brightness=255)
+
+    commands = runtime.parallel.async_dispatch.await_args.args[0]
+    assert commands[0] is not None
+    assert commands[1] is None
 
 
 async def test_first_idle_echo_failure_reconnects_but_keeps_group_available(
@@ -168,16 +182,16 @@ async def test_first_idle_echo_failure_reconnects_but_keeps_group_available(
     await runtime._async_run_keepalive(runtime._keepalive_generation)
 
     assert runtime.available
-    assert runtime._keepalive_failures == [0, 1]
+    assert runtime._keepalive_failures == [0, 0]
     runtime.parallel.async_request_reconnect.assert_awaited_once_with(
         1, _transport("192.0.2.2")
     )
 
 
-async def test_second_idle_echo_failure_makes_group_unavailable(
+async def test_second_idle_echo_failure_excludes_only_that_member(
     hass: HomeAssistant,
 ) -> None:
-    """Two missed Echoes from one member gate Group availability."""
+    """Two missed Echoes exclude one member but retain the healthy group."""
     runtime, _members = _runtime(hass)
     runtime.parallel.async_keepalive = AsyncMock(
         return_value=ParallelDispatchResult(
@@ -191,7 +205,7 @@ async def test_second_idle_echo_failure_makes_group_unavailable(
     await runtime._async_run_keepalive(runtime._keepalive_generation)
     await runtime._async_run_keepalive(runtime._keepalive_generation)
 
-    assert not runtime.available
+    assert runtime.available
     assert runtime._keepalive_healthy == [False, True]
 
 
@@ -242,7 +256,7 @@ async def test_member_reload_stays_unavailable_until_worker_reconnects(
     runtime.async_member_entry_state_changed(0)
     await reconnect_started.wait()
 
-    assert not runtime.available
+    assert runtime.available
 
     release_reconnect.set()
     await hass.async_block_till_done()
@@ -259,7 +273,7 @@ async def test_member_unload_makes_group_unavailable_without_stopping_workers(
 
     runtime.async_member_entry_state_changed(0)
 
-    assert not runtime.available
+    assert runtime.available
     runtime.parallel.async_stop.assert_not_called()
 
 
@@ -366,7 +380,7 @@ async def test_unavailable_group_state_request_is_a_silent_noop(
 ) -> None:
     """The unavailable entity state replaces a frontend command-error toast."""
     runtime, _members = _runtime(hass)
-    runtime._keepalive_healthy[0] = False
+    runtime._keepalive_healthy = [False, False]
 
     await runtime.async_set_state(power=True)
 
