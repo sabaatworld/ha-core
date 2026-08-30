@@ -56,5 +56,6 @@
     "aiolifx==1.2.2",
     "aiolifx-effects==0.3.2",
     "aiolifx-themes==1.0.4"
-  ]
+  ],
+  "version": "0.0.0"
 }
