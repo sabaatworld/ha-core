@@ -14,7 +14,9 @@ Keep the integration a drop-in replacement:
   `lifx-ultimate`; existing config entries use the `lifx` domain.
 - The component `name` may be `LIFX Ultimate`, but its technical domain stays
   `lifx`.
-- `manifest.json` must retain a custom-integration `version` field.
+- Do not add a `version` field to `manifest.json`; the HACS exporter derives
+  the version from `homeassistant/const.py` and injects it into the published
+  package.
 
 ## Paths and machines
 
@@ -80,6 +82,7 @@ ssh root@192.168.8.28 'ha core info'
 ssh root@192.168.8.28 'ha core logs --lines 300 2>&1 | grep -i -E "lifx|blocked|error"'
 ```
 
-On startup, a warning that `lifx` is a custom integration is expected. A
-message that it is blocked, a missing manifest version, or a reference to a
-different domain is not expected and should be investigated before continuing.
+On startup, warnings that `lifx` is a custom integration and that its manifest
+lacks a version are expected (the symlinked source has no version; the HACS
+exporter injects one). A message that it is blocked or references a different
+domain is not expected and should be investigated before continuing.

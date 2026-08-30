@@ -43,15 +43,31 @@ def _read_json(path: Path) -> dict[str, object] | None:
     return value if isinstance(value, dict) else None
 
 
-def _source_version(source: Path) -> str:
-    """Return the source integration's Home Assistant version."""
-    source_manifest = _read_json(source / "manifest.json")
-    if source_manifest is None or not isinstance(
-        source_version := source_manifest.get("version"), str
-    ):
-        msg = f"Missing required string version in source manifest: {source / 'manifest.json'}"
-        raise ValueError(msg)
-    return source_version
+def _home_assistant_version(source: Path) -> str:
+    """Return the Home Assistant version from homeassistant/const.py.
+
+    The pre-release suffix (for example, ``dev0``) is stripped from the patch.
+    """
+    const_path = source.parents[1] / "const.py"
+    if not const_path.is_file():
+        msg = f"Missing Home Assistant version source: {const_path}"
+        raise FileNotFoundError(msg)
+    const_source = const_path.read_text()
+    components: dict[str, str] = {}
+    for name in ("MAJOR_VERSION", "MINOR_VERSION", "PATCH_VERSION"):
+        match = re.search(
+            rf"^{name}: Final = (\d+|\"[^\"]+\")$", const_source, re.MULTILINE
+        )
+        if match is None:
+            msg = f"Missing {name} in {const_path}"
+            raise ValueError(msg)
+        components[name] = match.group(1).strip('"')
+    patch = re.sub(r"([.]?(?:dev|a|b|rc|post)\d+)+$", "", components["PATCH_VERSION"])
+    return (
+        f"{components['MAJOR_VERSION']}."
+        f"{components['MINOR_VERSION']}."
+        f"{patch}"
+    )
 
 
 def _next_version(
@@ -180,8 +196,8 @@ def export_distribution(
         msg = f"Missing required HACS feature guide: {feature_guide}"
         raise FileNotFoundError(msg)
 
-    source_version = _source_version(source)
-    version = _next_version(source_version, destination, source_revision)
+    home_assistant_version = _home_assistant_version(source)
+    version = _next_version(home_assistant_version, destination, source_revision)
     _clear_generated_content(destination)
     integration = destination / "custom_components" / DOMAIN
     integration.parent.mkdir(parents=True)
@@ -208,7 +224,7 @@ def export_distribution(
         destination / "hacs.json",
         {
             "hide_default_branch": True,
-            "homeassistant": source_version,
+            "homeassistant": home_assistant_version,
             "name": INTEGRATION_NAME,
         },
     )

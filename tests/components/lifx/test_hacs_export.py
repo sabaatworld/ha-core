@@ -8,10 +8,22 @@ import subprocess
 import sys
 
 
+def _write_home_assistant_version(tmp_path: Path) -> None:
+    """Write a dev-branch Home Assistant const.py (full version 2026.7.0.dev0)."""
+    homeassistant = tmp_path / "homeassistant"
+    homeassistant.mkdir(parents=True, exist_ok=True)
+    (homeassistant / "const.py").write_text(
+        "MAJOR_VERSION: Final = 2026\n"
+        "MINOR_VERSION: Final = 7\n"
+        'PATCH_VERSION: Final = "0.dev0"\n'
+    )
+
+
 def test_export_creates_hacs_layout_without_core_only_files(tmp_path: Path) -> None:
     """The export is a complete custom integration without Core-only inputs."""
-    source = tmp_path / "source"
-    source.mkdir()
+    source = tmp_path / "homeassistant" / "components" / "lifx"
+    source.mkdir(parents=True)
+    _write_home_assistant_version(tmp_path)
     (source / "__init__.py").write_text('"""LIFX."""\n')
     (source / "light.py").write_text('"""Light platform."""\n')
     (source / "AGENTS.md").write_text("Development instructions\n")
@@ -24,7 +36,6 @@ def test_export_creates_hacs_layout_without_core_only_files(tmp_path: Path) -> N
             {
                 "domain": "lifx",
                 "name": "LIFX Ultimate",
-                "version": "2026.7.2",
                 "codeowners": ["@Djelibeybi"],
                 "documentation": "https://www.home-assistant.io/integrations/lifx",
             }
@@ -71,14 +82,17 @@ def test_export_creates_hacs_layout_without_core_only_files(tmp_path: Path) -> N
     assert not (integration / "strings.json").exists()
     assert json.loads((destination / "hacs.json").read_text()) == {
         "hide_default_branch": True,
-        "homeassistant": "2026.7.2",
-        "name": "LIFX Ultimate"
+        "homeassistant": "2026.7.0",
+        "name": "LIFX Ultimate",
     }
     manifest = json.loads((integration / "manifest.json").read_text())
     assert manifest["domain"] == "lifx"
     assert manifest["name"] == "LIFX Ultimate"
-    assert manifest["version"] == "2026.7.2-v0.0.1"
-    assert manifest["issue_tracker"] == "https://github.com/sabaatworld/ha-lifx-ultimate/issues"
+    assert manifest["version"] == "2026.7.0-v0.0.1"
+    assert (
+        manifest["issue_tracker"]
+        == "https://github.com/sabaatworld/ha-lifx-ultimate/issues"
+    )
     readme = (destination / "README.md").read_text()
     assert "abc1234" in readme
     assert "## 📦 Automated publishing" in readme
@@ -92,14 +106,15 @@ def test_export_creates_hacs_layout_without_core_only_files(tmp_path: Path) -> N
     assert "--repo sabaatworld/ha-lifx-ultimate" in release_workflow
 
 
-def test_export_derives_version_from_source_manifest(tmp_path: Path) -> None:
-    """The next HACS version extends the source version and legacy suffix."""
-    source = tmp_path / "source"
-    source.mkdir()
+def test_export_derives_version_from_home_assistant_const(tmp_path: Path) -> None:
+    """The next HACS version extends the Home Assistant version and legacy suffix."""
+    source = tmp_path / "homeassistant" / "components" / "lifx"
+    source.mkdir(parents=True)
+    _write_home_assistant_version(tmp_path)
     (source / "__init__.py").write_text('"""LIFX."""\n')
     (source / "README_FEATURES.md").write_text("Feature guide content.\n")
     (source / "manifest.json").write_text(
-        json.dumps({"domain": "lifx", "name": "LIFX Ultimate", "version": "2026.7.2"})
+        json.dumps({"domain": "lifx", "name": "LIFX Ultimate"})
     )
     translations = source / "translations"
     translations.mkdir()
@@ -129,10 +144,10 @@ def test_export_derives_version_from_source_manifest(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert json.loads(
         (destination / "custom_components" / "lifx" / "manifest.json").read_text()
-    )["version"] == "2026.7.2-v0.0.4"
+    )["version"] == "2026.7.0-v0.0.4"
     assert json.loads((destination / ".lifx-ultimate-publish.json").read_text()) == {
         "source_revision": "def5678",
-        "version": "2026.7.2-v0.0.4",
+        "version": "2026.7.0-v0.0.4",
     }
 
     repeated_result = subprocess.run(
@@ -146,4 +161,4 @@ def test_export_derives_version_from_source_manifest(tmp_path: Path) -> None:
     assert repeated_result.returncode == 0, repeated_result.stderr
     assert json.loads(
         (destination / "custom_components" / "lifx" / "manifest.json").read_text()
-    )["version"] == "2026.7.2-v0.0.4"
+    )["version"] == "2026.7.0-v0.0.4"
