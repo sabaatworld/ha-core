@@ -208,7 +208,7 @@ class LIFXUpdateCoordinator(DataUpdateCoordinator[None]):
         """Clear a virtual-off marker when polling observes external visibility."""
         if not self.actual_power_on:
             if self.virtual_off:
-                _LOGGER.debug("LIFX virtual off cleared after physical power-off poll")
+                LOGGER.debug("LIFX virtual off cleared after physical power-off poll")
             self.virtual_off = False
             return
         visible = bool(self.device.color[2])
@@ -217,7 +217,7 @@ class LIFXUpdateCoordinator(DataUpdateCoordinator[None]):
         if visible:
             color = tuple(self.device.color)
             if self.virtual_off:
-                _LOGGER.debug("LIFX virtual off cleared after external visible-state poll")
+                LOGGER.debug("LIFX virtual off cleared after external visible-state poll")
             self.async_record_virtual_on(color)
 
     @property
