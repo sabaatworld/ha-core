@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Iterable
 from datetime import datetime, timedelta
 import socket
+import time
 from typing import Any
 
 from aiolifx.aiolifx import Light
@@ -227,11 +228,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: LIFXConfigEntry) -> bool
         raise ConfigEntryNotReady(f"Could not resolve {host}: {ex}") from ex
     coordinator = LIFXUpdateCoordinator(hass, entry, connection)
     coordinator.async_setup()
+    started = time.monotonic()
     try:
         await coordinator.async_config_entry_first_refresh()
     except ConfigEntryNotReady:
         connection.async_stop()
         raise
+    elapsed = time.monotonic() - started
+    if elapsed > 10:
+        LOGGER.warning("LIFX first refresh of %s took %.1f seconds", host, elapsed)
 
     serial = formatted_serial(coordinator.serial_number)
     if serial != entry.unique_id:

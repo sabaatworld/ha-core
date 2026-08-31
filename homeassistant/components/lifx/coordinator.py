@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from enum import IntEnum
 from functools import partial
 from math import floor, log10
+import time
 from typing import Any, cast, override
 
 from aiolifx.aiolifx import (
@@ -462,9 +463,13 @@ class LIFXUpdateCoordinator(DataUpdateCoordinator[None]):
         if features["infrared"]:
             methods.append(self.device.get_infrared)
 
+        started = time.monotonic()
         responses = await async_multi_execute_lifx_with_retries(
             methods, MAX_ATTEMPTS_PER_UPDATE_REQUEST_MESSAGE, MAX_UPDATE_TIME
         )
+        elapsed = time.monotonic() - started
+        if elapsed > 10:
+            LOGGER.warning("LIFX update of %s took %.1f seconds", self.name, elapsed)
         # device.mac_addr is not the mac_address, its the serial number
         if device.mac_addr == TARGET_ANY:
             device.mac_addr = responses[0].target_addr
