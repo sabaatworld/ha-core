@@ -490,10 +490,8 @@ async def test_transition_duration_legacy_multizone(hass: HomeAssistant) -> None
     assert {call[1]["duration"] for call in bulb.set_color_zones.calls} == {1500}
 
 
-async def test_direct_physical_power_off_does_not_create_virtual_off(
-    hass: HomeAssistant,
-) -> None:
-    """A direct physical turn-off remains a physical power command."""
+async def test_direct_physical_turn_off_sends_power_off(hass: HomeAssistant) -> None:
+    """A direct physical turn-off sends SetPower(False) with no virtual-off state."""
     config_entry = MockConfigEntry(
         domain=DOMAIN, data={CONF_HOST: "127.0.0.1"}, unique_id=SERIAL
     )
@@ -509,15 +507,13 @@ async def test_direct_physical_power_off_does_not_create_virtual_off(
         await async_setup_component(hass, lifx.DOMAIN, {lifx.DOMAIN: {}})
         await hass.async_block_till_done()
 
-    config_entry.runtime_data.async_record_virtual_off((32000, 10000, 30000, 6000))
     entity_id = "light.my_group_my_bulb"
     await hass.services.async_call(
         LIGHT_DOMAIN, "turn_off", {ATTR_ENTITY_ID: entity_id}, blocking=True
     )
 
     assert bulb.set_power.calls[-1][0][0] is False
-    assert not config_entry.runtime_data.virtual_off
-    assert config_entry.runtime_data.resume_hsbk == (32000, 10000, 30000, 6000)
+    assert not hasattr(config_entry.runtime_data, "virtual_off")
 
 
 async def test_extended_multizone_messages(hass: HomeAssistant) -> None:

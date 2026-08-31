@@ -37,16 +37,6 @@ def _member(ip_address: str, *, last_update_success: bool = True) -> MagicMock:
     coordinator.transition_on_duration = 0
     coordinator.transition_off_duration = 0
     coordinator.transition_cross_duration = 0
-    coordinator.virtual_off = False
-    coordinator.resume_hsbk = None
-    coordinator.async_record_virtual_off = MagicMock(
-        side_effect=lambda color: setattr(coordinator, "virtual_off", True)
-        or setattr(coordinator, "resume_hsbk", color)
-    )
-    coordinator.async_record_virtual_on = MagicMock(
-        side_effect=lambda color: setattr(coordinator, "virtual_off", False)
-        or setattr(coordinator, "resume_hsbk", color)
-    )
     coordinator.async_schedule_post_command_refresh = AsyncMock()
     return coordinator
 
@@ -406,10 +396,10 @@ async def test_latest_projection_wins_after_a_newer_group_request(
     assert runtime.display_state.is_on is False
 
 
-async def test_turning_on_an_off_member_with_color_uses_staged_commands(
+async def test_turning_on_an_off_member_with_color_uses_three_staged_commands(
     hass: HomeAssistant,
 ) -> None:
-    """An off member must acknowledge its hidden color before power is sent."""
+    """An off member primes a hidden color, powers on, then applies the color."""
     runtime, members = _runtime(hass)
     members[0].device.power_level = 0
     members[1].device.power_level = 0
@@ -418,14 +408,19 @@ async def test_turning_on_an_off_member_with_color_uses_staged_commands(
 
     commands = runtime.parallel.async_dispatch.await_args.args[0]
     assert all(command.kind == "color" for command in commands)
+    assert all(command.payload == (0, 0, 0, 4000, 0) for command in commands)
     assert all(command.second is not None for command in commands)
     assert all(command.second.kind == "power" for command in commands)
+    assert all(command.second.payload == (True, 0) for command in commands)
+    assert all(command.second.second is not None for command in commands)
+    assert all(command.second.second.kind == "color" for command in commands)
+    assert all(command.second.second.payload[2] == 65535 for command in commands)
 
 
-async def test_displayed_off_state_stages_color_and_power_for_every_member(
+async def test_displayed_off_state_stages_the_same_three_commands_for_every_member(
     hass: HomeAssistant,
 ) -> None:
-    """A group target, rather than mixed member caches, controls power staging."""
+    """A displayed-off target stages identically despite mixed member power caches."""
     runtime, members = _runtime(hass)
     members[0].device.power_level = 65535
     members[1].device.power_level = 0
@@ -442,11 +437,12 @@ async def test_displayed_off_state_stages_color_and_power_for_every_member(
 
     commands = runtime.parallel.async_dispatch.await_args.args[0]
     assert all(command.kind == "color" for command in commands)
-    assert all(command.payload[2] == 65535 for command in commands)
-    assert commands[0].second is None
-    assert commands[0].pad_before == 1
-    assert commands[1].second is not None
-    assert commands[1].second.kind == "power"
+    assert all(command.payload[2] == 0 for command in commands)
+    assert all(command.second is not None for command in commands)
+    assert all(command.second.kind == "power" for command in commands)
+    assert all(command.second.second is not None for command in commands)
+    assert all(command.second.second.kind == "color" for command in commands)
+    assert commands[0].payload == commands[1].payload
 
 
 async def test_expired_display_state_uses_one_aggregate_baseline_for_all_members(
@@ -466,26 +462,48 @@ async def test_expired_display_state_uses_one_aggregate_baseline_for_all_members
     assert all(command.payload == commands[0].payload for command in commands)
 
 
-async def test_displayed_on_state_sends_one_virtual_off_color_for_every_member(
+async def test_bare_turn_on_from_off_uses_the_three_stage_sequence(
     hass: HomeAssistant,
 ) -> None:
-    """A displayed on target controls turn-off staging despite off member caches."""
+    """A bare turn_on primes the last color, powers on, then applies it."""
     runtime, members = _runtime(hass)
-    for member in members:
-        member.device.power_level = 0
-    runtime._begin_projection(
-        (
-            _MemberCommandState((100, 200, 300, 3500), 65535),
-            _MemberCommandState((100, 200, 300, 3500), 65535),
-        )
-    )
+    members[0].device.power_level = 0
+    members[1].device.power_level = 0
+    members[0].device.color = [100, 200, 300, 3500]
+    members[1].device.color = [100, 200, 300, 3500]
 
-    await runtime.async_set_state(power=False, brightness=255)
+    await runtime.async_set_state(power=True)
 
     commands = runtime.parallel.async_dispatch.await_args.args[0]
     assert all(command.kind == "color" for command in commands)
-    assert all(command.second is None for command in commands)
     assert all(command.payload[2] == 0 for command in commands)
+    assert all(command.second is not None for command in commands)
+    assert all(command.second.kind == "power" for command in commands)
+    assert all(command.second.second is not None for command in commands)
+    assert all(command.second.second.kind == "color" for command in commands)
+    assert all(command.second.second.payload[2] == 300 for command in commands)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected_best_effort"),
+    [
+        pytest.param({"power": True}, True, id="turn-on"),
+        pytest.param({"power": False}, False, id="turn-off"),
+    ],
+)
+async def test_turn_on_marks_the_first_stage_best_effort(
+    hass: HomeAssistant,
+    kwargs: dict[str, bool],
+    expected_best_effort: bool,
+) -> None:
+    """Turning a group on from off keeps unacked members for the power stage."""
+    runtime, members = _runtime(hass)
+    for member in members:
+        member.device.power_level = 0 if kwargs["power"] else 65535
+
+    await runtime.async_set_state(**kwargs)
+
+    assert runtime.parallel.async_dispatch.await_args.args[1] is expected_best_effort
 
 
 async def test_displayed_on_color_change_uses_cross_fade_for_every_member(
@@ -504,10 +522,10 @@ async def test_displayed_on_color_change_uses_cross_fade_for_every_member(
     assert all(command.payload[-1] == 900 for command in commands)
 
 
-async def test_group_power_off_sends_brightness_zero_but_displays_off(
+async def test_group_power_off_sends_a_power_command_and_displays_off(
     hass: HomeAssistant,
 ) -> None:
-    """A group turn-off is visually black but remains logically off in HA."""
+    """A group turn-off sends SetPower(False) and the group displays off."""
     runtime, members = _runtime(hass)
     for member in members:
         member.device.color = [100, 200, 300, 3500]
@@ -516,13 +534,11 @@ async def test_group_power_off_sends_brightness_zero_but_displays_off(
     await runtime.async_set_state(power=False)
 
     commands = runtime.parallel.async_dispatch.await_args.args[0]
-    assert all(command.kind == "color" for command in commands)
+    assert all(command.kind == "power" for command in commands)
+    assert all(command.payload == (False, 0) for command in commands)
     assert all(command.second is None for command in commands)
-    assert all(command.payload == (100, 200, 0, 3500, 0) for command in commands)
     assert runtime.display_state.color == (100, 200, 300, 3500)
     assert runtime.display_state.is_on is False
-    assert all(member.virtual_off for member in members)
-    assert all(member.async_record_virtual_off.call_count == 1 for member in members)
 
 
 async def test_colorloop_uses_one_displayed_state_baseline_for_every_member(
@@ -574,10 +590,10 @@ async def test_paint_theme_stages_power_before_color(
     assert commands[0].second.payload == (0, 65535, 65535, 3500, 0)
 
 
-async def test_turning_off_with_a_transition_keeps_the_requested_color_hidden(
+async def test_turning_off_with_a_transition_uses_the_power_transition(
     hass: HomeAssistant,
 ) -> None:
-    """A color-plus-off request ends with an invisible brightness-zero stage."""
+    """A color-plus-off request turns off with the transition duration."""
     runtime, members = _runtime(hass)
     for member in members:
         member.device.power_level = 0
@@ -585,10 +601,9 @@ async def test_turning_off_with_a_transition_keeps_the_requested_color_hidden(
     await runtime.async_set_state(power=False, brightness=255, transition=1)
 
     commands = runtime.parallel.async_dispatch.await_args.args[0]
-    assert all(command.kind == "color" for command in commands)
+    assert all(command.kind == "power" for command in commands)
     assert all(command.second is None for command in commands)
-    assert all(command.payload[2] == 0 for command in commands)
-    assert runtime.display_state.color[2] == 65535
+    assert all(command.payload == (False, 1000) for command in commands)
     assert runtime.display_state.is_on is False
 
 

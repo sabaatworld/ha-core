@@ -180,6 +180,42 @@ def test_final_stage_of_a_combined_command_requires_its_own_ack_budget() -> None
     assert dispatch_stage.call_args_list[0].args[5] != dispatch_stage.call_args_list[1].args[5]
 
 
+@pytest.mark.parametrize(
+    ("best_effort", "expected_failed"),
+    [
+        pytest.param(True, set(), id="best-effort-advances-member"),
+        pytest.param(False, {0}, id="exclusionary-drops-member"),
+    ],
+)
+def test_first_stage_best_effort_keeps_unacked_members_for_later_stages(
+    best_effort: bool, expected_failed: set[int]
+) -> None:
+    """A best-effort first stage still advances members that miss its ACK."""
+    runtime = LIFXParallelRuntime(MagicMock(), ("host",))
+    worker = SimpleNamespace(host="host", process=MagicMock(), pipe=MagicMock())
+    runtime._workers = [worker]
+    runtime._current_generation = SimpleNamespace(value=1)
+    command = ParallelCommand(
+        "color",
+        (1, 2, 0, 3500, 0),
+        ParallelCommand("power", (True, 0)),
+    )
+
+    with (
+        patch.object(runtime, "_replace_dead_workers"),
+        patch.object(
+            runtime,
+            "_dispatch_stage",
+            side_effect=[((worker, command),), ()],
+        ),
+    ):
+        result = runtime._dispatch(
+            1, (command,), first_stage_best_effort=best_effort
+        )
+
+    assert result == expected_failed
+
+
 def test_new_request_cancels_active_ack_wait_without_waiting_for_cleanup() -> None:
     """Supersession signals the worker and completes the old caller immediately."""
     runtime = LIFXParallelRuntime(MagicMock(), ("host",))
@@ -235,6 +271,21 @@ def test_command_stages_preserve_member_dependency_order() -> None:
     )
 
     assert tuple(stage.kind for stage in command.stages) == ("power", "color")
+
+
+def test_command_stages_traverse_a_three_stage_chain() -> None:
+    """A nested three-stage command yields color, power, color in order."""
+    command = ParallelCommand(
+        "color",
+        (1, 2, 0, 3500, 0),
+        ParallelCommand(
+            "power",
+            (True, 0),
+            ParallelCommand("color", (1, 2, 65535, 3500, 0)),
+        ),
+    )
+
+    assert tuple(stage.kind for stage in command.stages) == ("color", "power", "color")
 
 
 def test_wait_for_ack_ignores_malformed_response_and_matches_sequence() -> None:

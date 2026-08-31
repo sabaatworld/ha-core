@@ -30,7 +30,6 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.event import async_call_later
 
 from .const import (
-    LOGGER,
     CONF_GROUP_ID,
     CONF_MEMBERS,
     DATA_LIFX_MANAGER,
@@ -40,6 +39,7 @@ from .const import (
     DEVICE_GROUP_OPTIMISTIC_STATE_EXPIRY,
     DOMAIN,
     LIFX_CEILING_PRODUCT_IDS,
+    LOGGER,
     TRANSITION_CROSS_DURATION,
     TRANSITION_OFF_DURATION,
     TRANSITION_ON_DURATION,
@@ -243,16 +243,9 @@ class LIFXParallelGroupRuntime:
 
     @property
     def member_states(self) -> tuple[_MemberCommandState, ...]:
-        """Return physical state with each member's virtual power projection."""
+        """Return physical state for each member."""
         return tuple(
-            _MemberCommandState(
-                tuple(
-                    member.resume_hsbk
-                    if member.virtual_off and member.resume_hsbk is not None
-                    else member.device.color
-                ),
-                65535 if member.device.power_level and not member.virtual_off else 0,
-            )
+            _MemberCommandState(tuple(member.device.color), member.device.power_level)
             for member in self.members
         )
 
@@ -780,7 +773,7 @@ class LIFXParallelGroupRuntime:
         """Snapshot and log the displayed state used to build one operation."""
         display_state = self.display_state
         LOGGER.debug(
-            "LIFX Device Group %s state baseline: is_on=%s",
+            "LIFX Device Group %s %s state baseline: is_on=%s",
             self.group_id,
             operation,
             display_state.is_on,
@@ -812,25 +805,21 @@ class LIFXParallelGroupRuntime:
             )
             states.append(_MemberCommandState(target_color, target_power))
             if power is False:
+                commands.append(ParallelCommand("power", (False, duration)))
+            elif power is True and not display_state.is_on:
+                # Stage 0 primes the bulb dark with a fixed neutral white so
+                # every member powers on at the same, invisible brightness.
                 commands.append(
                     ParallelCommand(
                         "color",
-                        (*target_color[:2], 0, target_color[3], duration),
+                        (0, 0, 0, 4000, 0),
+                        ParallelCommand(
+                            "power",
+                            (True, 0),
+                            ParallelCommand("color", (*target_color, duration)),
+                        ),
                     )
                 )
-            elif power is True and not display_state.is_on:
-                if member.device.power_level:
-                    commands.append(
-                        ParallelCommand("color", (*target_color, duration), pad_before=1)
-                    )
-                else:
-                    commands.append(
-                        ParallelCommand(
-                            "color",
-                            (*target_color, 0),
-                            ParallelCommand("power", (True, duration)),
-                        )
-                    )
             elif color is not None:
                 commands.append(ParallelCommand("color", (*color, duration)))
             elif power is not None:
@@ -841,20 +830,21 @@ class LIFXParallelGroupRuntime:
         await self._async_dispatch_projected_states(
             tuple(commands),
             tuple(states),
-            virtual_off=power is False,
+            first_stage_best_effort=power is True and not display_state.is_on,
         )
 
     async def _async_dispatch_projected_states(
         self,
         commands: tuple[ParallelCommand, ...],
         states: tuple[_MemberCommandState, ...],
-        virtual_off: bool = False,
+        first_stage_best_effort: bool = False,
     ) -> bool:
         """Dispatch a command and keep its aggregate projection until polling catches up."""
         generation = self._begin_projection(states)
         try:
             result = await self.parallel.async_dispatch(
-                self._commands_for_available_members(commands)
+                self._commands_for_available_members(commands),
+                first_stage_best_effort,
             )
         except HomeAssistantError:
             result = ParallelDispatchResult(ParallelDispatchOutcome.FAILED, 0)
@@ -863,11 +853,7 @@ class LIFXParallelGroupRuntime:
             self._log_dispatch_outcome("state", result)
             return False
         self._reset_keepalive_health()
-        for member, state in zip(self.members, states, strict=True):
-            if virtual_off:
-                member.async_record_virtual_off(state.color)
-            elif state.power_level:
-                member.async_record_virtual_on(state.color)
+        for member in self.members:
             member.async_set_updated_data(None)
         return True
 
