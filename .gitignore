@@ -10,6 +10,8 @@ data/
 
 # Translations
 homeassistant/components/*/translations
+!homeassistant/components/lifx/translations/
+!homeassistant/components/lifx/translations/en.json
 
 # Hide sublime text stuff
 *.sublime-project

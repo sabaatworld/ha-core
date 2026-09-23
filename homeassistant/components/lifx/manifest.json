@@ -1,6 +1,6 @@
 {
   "domain": "lifx",
-  "name": "LIFX",
+  "name": "LIFX Ultimate",
   "codeowners": ["@Djelibeybi"],
   "config_flow": true,
   "dependencies": ["network"],
@@ -53,5 +53,6 @@
   "iot_class": "local_polling",
   "loggers": ["lifx"],
   "requirements": ["lifx-async==6.5.1"],
+  "version": "0.0.0",
   "zeroconf": ["_lifx._udp.local."]
 }
