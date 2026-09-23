@@ -10,12 +10,23 @@ from homeassistant.exceptions import ConfigEntryError, ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import ConfigType
 
-from .const import CONF_SERIAL, DATA_LIFX_MANAGER, DOMAIN, LOGGER
+from .const import (
+    CONF_ENTRY_TYPE,
+    CONF_SERIAL,
+    DATA_LIFX_MANAGER,
+    DOMAIN,
+    ENTRY_TYPE_PARALLEL_GROUP,
+    LOGGER,
+)
 from .coordinator import LIFXConfigEntry, LIFXUpdateCoordinator
 from .discovery import async_setup_discovery
 from .entity import async_repair_device_registry
 from .manager import LIFXManager
 from .migration import async_migrate_serials
+from .parallel_group import (
+    async_setup_parallel_group_entry,
+    async_unload_parallel_group_entry,
+)
 from .services import async_setup_services
 from .util import async_resolve_host, normalize_serial
 
@@ -50,6 +61,7 @@ PLATFORMS = [
     Platform.BINARY_SENSOR,
     Platform.BUTTON,
     Platform.LIGHT,
+    Platform.NUMBER,
     Platform.SELECT,
     Platform.SENSOR,
 ]
@@ -99,6 +111,9 @@ async def async_migrate_entry(hass: HomeAssistant, entry: LIFXConfigEntry) -> bo
 
 async def async_setup_entry(hass: HomeAssistant, entry: LIFXConfigEntry) -> bool:
     """Set up LIFX from a config entry."""
+    if entry.data.get(CONF_ENTRY_TYPE) == ENTRY_TYPE_PARALLEL_GROUP:
+        return await async_setup_parallel_group_entry(hass, entry)
+
     assert entry.unique_id is not None
     host = entry.data[CONF_HOST]
     try:
@@ -128,6 +143,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: LIFXConfigEntry) -> bool
 
 async def async_unload_entry(hass: HomeAssistant, entry: LIFXConfigEntry) -> bool:
     """Unload a config entry."""
+    if entry.data.get(CONF_ENTRY_TYPE) == ENTRY_TYPE_PARALLEL_GROUP:
+        return await async_unload_parallel_group_entry(hass, entry)
+
     manager = hass.data[DATA_LIFX_MANAGER]
     try:
         # The device is about to be closed out from under any running effect

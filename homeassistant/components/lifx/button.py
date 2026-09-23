@@ -7,13 +7,14 @@ from homeassistant.components.button import (
     ButtonEntity,
     ButtonEntityDescription,
 )
-from homeassistant.const import EntityCategory
+from homeassistant.const import EntityCategory, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import IDENTIFY, RESTART
-from .coordinator import LIFXConfigEntry
+from .coordinator import LIFXConfigEntry, LIFXUpdateCoordinator
 from .entity import LIFXEntity
+from .parallel_group import async_add_parallel_group_entities
 
 PARALLEL_UPDATES = 1
 
@@ -36,6 +37,10 @@ async def async_setup_entry(
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     """Set up LIFX from a config entry."""
+    if not isinstance(entry.runtime_data, LIFXUpdateCoordinator):
+        async_add_parallel_group_entities(entry, async_add_entities, Platform.BUTTON)
+        return
+
     coordinator = entry.runtime_data
     async_add_entities(
         [

@@ -6,6 +6,7 @@ from datetime import timedelta
 from typing import cast, override
 
 from lifx import (
+    HSBK,
     STATE_REFRESH_DEBOUNCE_MS,
     CeilingLightState,
     Colors,
@@ -56,6 +57,11 @@ class LIFXUpdateCoordinator(DataUpdateCoordinator[LIFXState]):
         """Initialize the coordinator."""
         self.device = device
         self.last_used_theme: str | None = None
+        self.transition_on_duration: float = 0.0
+        self.transition_off_duration: float = 0.0
+        self.transition_cross_duration: float = 0.0
+        self.virtual_off = False
+        self.resume_hsbk: HSBK | None = None
         super().__init__(
             hass,
             LOGGER,
@@ -92,6 +98,56 @@ class LIFXUpdateCoordinator(DataUpdateCoordinator[LIFXState]):
     def serial_number(self) -> str:
         """Return the raw LIFX serial that identifies the device."""
         return self.data.serial
+
+    @property
+    def actual_power_on(self) -> bool:
+        """Return the physical device power state, independent of virtual off."""
+        return self.data.power != 0
+
+    @property
+    def display_color(self) -> HSBK:
+        """Return the color used to resume a virtual-off light."""
+        return self.resume_hsbk or cast(LightState, self.data).color
+
+    @callback
+    def async_record_virtual_off(self, color: HSBK) -> None:
+        """Record a successful whole-light virtual power-off request."""
+        self.resume_hsbk = color
+        self.virtual_off = True
+
+    @callback
+    def async_record_virtual_on(self, color: HSBK) -> None:
+        """Record a successful visible whole-light command."""
+        self.resume_hsbk = color
+        self.virtual_off = False
+
+    @callback
+    def async_clear_virtual_off(self) -> None:
+        """Clear a superseded Device Group virtual-off marker."""
+        self.virtual_off = False
+
+    @callback
+    def async_reconcile_virtual_power(self) -> None:
+        """Clear a virtual-off marker when polling observes external visibility."""
+        if self.data.power == 0:
+            if self.virtual_off:
+                LOGGER.debug("LIFX virtual off cleared after physical power-off poll")
+            self.virtual_off = False
+            return
+        state = self.data
+        if isinstance(state, MultiZoneLightState):
+            visible = any(zone.brightness > 0 for zone in state.zones)
+        elif isinstance(state, MatrixLightState):
+            visible = any(color.brightness > 0 for color in state.tile_colors)
+        else:
+            visible = cast(LightState, state).color.brightness > 0
+        if visible:
+            color = cast(LightState, state).color
+            if self.virtual_off:
+                LOGGER.debug(
+                    "LIFX virtual off cleared after external visible-state poll"
+                )
+            self.async_record_virtual_on(color)
 
     @property
     def current_infrared_brightness(self) -> str | None:

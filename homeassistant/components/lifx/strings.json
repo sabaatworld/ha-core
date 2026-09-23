@@ -10,12 +10,25 @@
     },
     "error": {
       "cannot_connect": "[%key:common::config_flow::error::cannot_connect%]",
+      "duplicate_members": "Select each light only once.",
+      "invalid_members": "The selected lights are not available physical LIFX devices.",
       "invalid_serial": "This is not a valid LIFX serial number."
     },
     "flow_title": "{label} ({group})",
     "step": {
       "discovery_confirm": {
         "description": "Do you want to set up {label} ({group})?"
+      },
+      "device": {
+        "data": {
+          "host": "[%key:common::config_flow::data::host%]",
+          "serial": "Serial number"
+        },
+        "data_description": {
+          "host": "The hostname or IP address of your LIFX device.",
+          "serial": "The twelve-character serial number printed on your LIFX device. On its own, it is resolved by broadcasting to your network."
+        },
+        "description": "Fill in the host, the serial number, or both. If you leave both empty, discovery will be used to find devices."
       },
       "pick_device": {
         "data": {
@@ -34,16 +47,18 @@
         },
         "description": "Update where Home Assistant reaches this LIFX device. The serial number is not changed, so this has to be the same device."
       },
-      "user": {
+      "parallel_group": {
         "data": {
-          "host": "[%key:common::config_flow::data::host%]",
-          "serial": "Serial number"
+          "members": "Lights",
+          "name": "Group name"
         },
-        "data_description": {
-          "host": "The hostname or IP address of your LIFX device.",
-          "serial": "The twelve-character serial number printed on your LIFX device. On its own, it is resolved by broadcasting to your network."
-        },
-        "description": "Fill in the host, the serial number, or both. If you leave both empty, discovery will be used to find devices."
+        "description": "Create a virtual LIFX Device Group that dispatches commands to its member lights together."
+      },
+      "user": {
+        "menu_options": {
+          "device": "Add Device by IP",
+          "parallel_group": "Add Device Group"
+        }
       }
     }
   },
@@ -51,6 +66,17 @@
     "binary_sensor": {
       "clean_cycle": {
         "name": "Clean cycle"
+      }
+    },
+    "number": {
+      "transition_on_duration": {
+        "name": "Fade On Time"
+      },
+      "transition_off_duration": {
+        "name": "Fade Off Time"
+      },
+      "transition_cross_duration": {
+        "name": "Cross Fade Time"
       }
     },
     "select": {

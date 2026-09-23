@@ -1722,3 +1722,45 @@ async def test_palette_bounds_match_the_documented_action(
             {ATTR_ENTITY_ID: ENTITY_ID, ATTR_PALETTE: palette},
             blocking=True,
         )
+
+
+async def test_transition_duration_number_sets_the_default_fade(
+    hass: HomeAssistant,
+) -> None:
+    """Test a configured fade-on duration is used when no transition is given."""
+    device = create_mock_light()
+    device.state.power = 0
+    entry = await async_setup_lifx_entry(hass, device)
+    entry.runtime_data.transition_on_duration = 2.0
+
+    await hass.services.async_call(
+        LIGHT_DOMAIN,
+        SERVICE_TURN_ON,
+        {ATTR_ENTITY_ID: ENTITY_ID, ATTR_BRIGHTNESS: 128},
+        blocking=True,
+    )
+
+    device.set_power.assert_awaited_once_with(True, duration=2.0)
+
+
+async def test_direct_physical_power_off_does_not_create_virtual_off(
+    hass: HomeAssistant,
+) -> None:
+    """A direct physical turn-off remains a physical power command."""
+    device = create_mock_light()
+    device.state.power = 65535
+    device.state.color = HSBK(20.0, 0.25, 0.75, 3500)
+    entry = await async_setup_lifx_entry(hass, device)
+
+    entry.runtime_data.async_record_virtual_off(device.state.color)
+
+    await hass.services.async_call(
+        LIGHT_DOMAIN,
+        SERVICE_TURN_OFF,
+        {ATTR_ENTITY_ID: ENTITY_ID},
+        blocking=True,
+    )
+
+    device.set_power.assert_awaited_once_with(False, duration=0.0)
+    assert not entry.runtime_data.virtual_off
+    assert entry.runtime_data.resume_hsbk == device.state.color

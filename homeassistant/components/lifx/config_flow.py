@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from typing import Any, Self, override
+from uuid import uuid4
 
 from lifx import (
     Device,
@@ -17,6 +18,7 @@ from homeassistant.components import onboarding
 from homeassistant.config_entries import ConfigEntryState, ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_DEVICE, CONF_HOST
 from homeassistant.core import callback
+from homeassistant.helpers import entity_registry as er, selector
 from homeassistant.helpers.service_info.dhcp import DhcpServiceInfo
 from homeassistant.helpers.service_info.zeroconf import (
     ATTR_PROPERTIES_ID,
@@ -24,7 +26,15 @@ from homeassistant.helpers.service_info.zeroconf import (
 )
 from homeassistant.helpers.typing import DiscoveryInfoType
 
-from .const import CONF_SERIAL, DOMAIN, LOGGER
+from .const import (
+    CONF_ENTRY_TYPE,
+    CONF_GROUP_ID,
+    CONF_MEMBERS,
+    CONF_SERIAL,
+    DOMAIN,
+    ENTRY_TYPE_PARALLEL_GROUP,
+    LOGGER,
+)
 from .coordinator import LIFXConfigEntry
 from .discovery import async_discover_devices
 from .util import async_entry_serial, async_resolve_host, normalize_serial
@@ -214,6 +224,14 @@ class LIFXConfigFlow(ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Handle the initial step."""
+        return self.async_show_menu(
+            step_id="user", menu_options=["device", "parallel_group"]
+        )
+
+    async def async_step_device(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Handle manual device setup."""
         errors = {}
         if user_input is not None:
             host = user_input[CONF_HOST]
@@ -233,11 +251,89 @@ class LIFXConfigFlow(ConfigFlow, domain=DOMAIN):
                 errors["base"] = "cannot_connect"
 
         return self.async_show_form(
-            step_id="user",
+            step_id="device",
             data_schema=probatio.Schema(
                 {
                     probatio.Optional(CONF_HOST, default=""): str,
                     probatio.Optional(CONF_SERIAL, default=""): str,
+                }
+            ),
+            errors=errors,
+        )
+
+    async def async_step_parallel_group(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Create a parallel LIFX group."""
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            members = user_input[CONF_MEMBERS]
+            if not members:
+                errors["base"] = "invalid_members"
+            elif len(members) != len(set(members)):
+                errors["base"] = "duplicate_members"
+            else:
+                entity_registry = er.async_get(self.hass)
+                member_entry_ids: list[str] = []
+                for entity_id in members:
+                    registry_entry = entity_registry.async_get(entity_id)
+                    if (
+                        registry_entry is None
+                        or registry_entry.platform != DOMAIN
+                        or registry_entry.config_entry_id is None
+                    ):
+                        errors["base"] = "invalid_members"
+                        break
+                    member_entry = self.hass.config_entries.async_get_entry(
+                        registry_entry.config_entry_id
+                    )
+                    if (
+                        member_entry is None
+                        or member_entry.domain != DOMAIN
+                        or member_entry.data.get(CONF_ENTRY_TYPE)
+                        == ENTRY_TYPE_PARALLEL_GROUP
+                    ):
+                        errors["base"] = "invalid_members"
+                        break
+                    member_entry_ids.append(member_entry.entry_id)
+
+                if not errors:
+                    normalized_members = sorted(member_entry_ids)
+                    if len(normalized_members) != len(set(normalized_members)):
+                        errors["base"] = "duplicate_members"
+                    else:
+                        for entry in self._async_current_entries():
+                            if (
+                                entry.data.get(CONF_ENTRY_TYPE)
+                                == ENTRY_TYPE_PARALLEL_GROUP
+                                and sorted(entry.data[CONF_MEMBERS])
+                                == normalized_members
+                            ):
+                                return self.async_abort(reason="already_configured")
+                    if not errors:
+                        group_id = uuid4().hex
+                        await self.async_set_unique_id(
+                            f"parallel-group-{group_id}", raise_on_progress=False
+                        )
+                        return self.async_create_entry(
+                            title=user_input["name"],
+                            data={
+                                CONF_ENTRY_TYPE: ENTRY_TYPE_PARALLEL_GROUP,
+                                CONF_GROUP_ID: group_id,
+                                CONF_MEMBERS: normalized_members,
+                            },
+                        )
+
+        return self.async_show_form(
+            step_id="parallel_group",
+            data_schema=probatio.Schema(
+                {
+                    probatio.Required("name"): selector.TextSelector(),
+                    probatio.Required(CONF_MEMBERS): selector.EntitySelector(
+                        selector.EntitySelectorConfig(
+                            integration=DOMAIN, domain="light", multiple=True
+                        )
+                    ),
                 }
             ),
             errors=errors,

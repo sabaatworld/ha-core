@@ -99,7 +99,7 @@ class LIFXManager:
         """Initialize the manager."""
         self.hass = hass
         self.effects_conductor = Conductor()
-        self.entity_id_to_coordinator: dict[str, LIFXUpdateCoordinator] = {}
+        self.entity_id_to_coordinator: dict[str, Any] = {}
 
     async def async_stop_effects(self, device: Device) -> None:
         """Stop any software effect still running on a device."""
@@ -108,7 +108,7 @@ class LIFXManager:
 
     @callback
     def async_register_entity(
-        self, entity_id: str, coordinator: LIFXUpdateCoordinator
+        self, entity_id: str, coordinator: Any
     ) -> Callable[[], None]:
         """Register an entity to the config entry id."""
         self.entity_id_to_coordinator[entity_id] = coordinator
@@ -398,10 +398,22 @@ class LIFXManager:
         self, entity_ids: set[str], service: ServiceCall, strict: bool = True
     ) -> None:
         """Start a light effect on entities."""
+        handled_groups = 0
+        parallel_groups = [
+            controller
+            for entity_id, controller in self.entity_id_to_coordinator.items()
+            if entity_id in entity_ids
+            and not isinstance(controller, LIFXUpdateCoordinator)
+        ]
+        for parallel_group in parallel_groups:
+            if parallel_group.supports_effect(service.service):
+                await parallel_group.async_start_effect(service.service, **service.data)
+                handled_groups += 1
         coordinators = [
             coordinator
             for entity_id, coordinator in self.entity_id_to_coordinator.items()
             if entity_id in entity_ids
+            and isinstance(coordinator, LIFXUpdateCoordinator)
         ]
         devices = [
             coordinator.device
@@ -409,7 +421,7 @@ class LIFXManager:
             if isinstance(coordinator.device, Light)
         ]
         if not devices:
-            if not strict:
+            if not strict or handled_groups:
                 return
             raise ServiceValidationError(
                 translation_domain=DOMAIN,

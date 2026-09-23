@@ -17,10 +17,17 @@ import pytest
 from homeassistant import config_entries
 from homeassistant.components.lifx import DOMAIN
 from homeassistant.components.lifx.config_flow import LIFXConfigFlow
-from homeassistant.components.lifx.const import CONF_SERIAL
+from homeassistant.components.lifx.const import (
+    CONF_ENTRY_TYPE,
+    CONF_GROUP_ID,
+    CONF_MEMBERS,
+    CONF_SERIAL,
+    ENTRY_TYPE_PARALLEL_GROUP,
+)
 from homeassistant.const import CONF_DEVICE, CONF_HOST
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.service_info.dhcp import DhcpServiceInfo
 from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 
@@ -723,6 +730,9 @@ async def test_manual_host_creates_version_2_entry(
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
     )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"next_step_id": "device"}
+    )
     with patch(
         "homeassistant.components.lifx.config_flow.find_by_ip",
         return_value=mock_light,
@@ -744,6 +754,9 @@ async def test_manual_hostname_is_stored_as_an_address(
     """Test a hostname is resolved before the entry records where to reach it."""
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"next_step_id": "device"}
     )
     with (
         patch(
@@ -779,6 +792,9 @@ async def test_manual_serial_creates_version_2_entry(
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
     )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"next_step_id": "device"}
+    )
     with patch(
         "homeassistant.components.lifx.config_flow.find_by_serial",
         return_value=mock_light,
@@ -802,6 +818,9 @@ async def test_manual_serial_that_answers_no_broadcast(
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
     )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"next_step_id": "device"}
+    )
     with patch(
         "homeassistant.components.lifx.config_flow.find_by_serial",
         return_value=None,
@@ -811,7 +830,7 @@ async def test_manual_serial_that_answers_no_broadcast(
         )
 
     assert result["type"] is FlowResultType.FORM
-    assert result["step_id"] == "user"
+    assert result["step_id"] == "device"
     assert result["errors"] == {"base": "cannot_connect"}
 
 
@@ -821,6 +840,9 @@ async def test_manual_host_and_serial_connects_directly(
     """Test giving both identifiers skips discovery entirely."""
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"next_step_id": "device"}
     )
     with (
         patch(
@@ -850,11 +872,14 @@ async def test_manual_setup_rejects_a_malformed_serial(hass: HomeAssistant) -> N
         DOMAIN, context={"source": config_entries.SOURCE_USER}
     )
     result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"next_step_id": "device"}
+    )
+    result = await hass.config_entries.flow.async_configure(
         result["flow_id"], {CONF_SERIAL: "not-a-serial"}
     )
 
     assert result["type"] is FlowResultType.FORM
-    assert result["step_id"] == "user"
+    assert result["step_id"] == "device"
     assert result["errors"] == {CONF_SERIAL: "invalid_serial"}
 
 
@@ -875,6 +900,9 @@ async def test_manual_host_while_discovery_is_pending(
 
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"next_step_id": "device"}
     )
     with patch(
         "homeassistant.components.lifx.config_flow.find_by_ip",
@@ -905,6 +933,9 @@ async def test_manual_host_cannot_connect(
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
     )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"next_step_id": "device"}
+    )
     find_by_ip = AsyncMock(return_value=None, side_effect=find_error)
     with patch("homeassistant.components.lifx.config_flow.find_by_ip", find_by_ip):
         result = await hass.config_entries.flow.async_configure(
@@ -912,7 +943,7 @@ async def test_manual_host_cannot_connect(
         )
 
     assert result["type"] is FlowResultType.FORM
-    assert result["step_id"] == "user"
+    assert result["step_id"] == "device"
     assert result["errors"] == {"base": "cannot_connect"}
 
     with patch(
@@ -943,6 +974,9 @@ async def test_manual_host_cannot_read_device_state(
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
     )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"next_step_id": "device"}
+    )
     mutate_device(mock_light)
 
     with patch(
@@ -954,7 +988,7 @@ async def test_manual_host_cannot_read_device_state(
         )
 
     assert result["type"] is FlowResultType.FORM
-    assert result["step_id"] == "user"
+    assert result["step_id"] == "device"
     assert result["errors"] == {"base": "cannot_connect"}
     mock_light.close.assert_awaited_once_with()
 
@@ -966,6 +1000,9 @@ async def test_pick_broadcast_discovered_device(
     discovered = DiscoveredDevice(serial=SERIAL, ip=IP_ADDRESS)
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"next_step_id": "device"}
     )
     with _mock_broadcast_discovery(discovered):
         result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
@@ -990,6 +1027,9 @@ async def test_pick_device_without_discovery_results(hass: HomeAssistant) -> Non
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
     )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"next_step_id": "device"}
+    )
     with _mock_broadcast_discovery():
         result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
 
@@ -1005,6 +1045,9 @@ async def test_pick_device_cannot_validate_discovery(
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
     )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"next_step_id": "device"}
+    )
     with _mock_broadcast_discovery(discovered):
         result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
 
@@ -1018,3 +1061,39 @@ async def test_pick_device_cannot_validate_discovery(
 
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "cannot_connect"
+
+
+async def test_parallel_group_config_flow(hass: HomeAssistant) -> None:
+    """Test creating a Device Group from two configured physical lights."""
+    first = MockConfigEntry(domain=DOMAIN, data={CONF_HOST: "192.0.2.1"})
+    second = MockConfigEntry(domain=DOMAIN, data={CONF_HOST: "192.0.2.2"})
+    first.add_to_hass(hass)
+    second.add_to_hass(hass)
+    entity_registry = er.async_get(hass)
+    first_entity = entity_registry.async_get_or_create(
+        "light", DOMAIN, "first", config_entry=first, original_name="First"
+    )
+    second_entity = entity_registry.async_get_or_create(
+        "light", DOMAIN, "second", config_entry=second, original_name="Second"
+    )
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"next_step_id": "parallel_group"}
+    )
+    assert result["type"] is FlowResultType.FORM
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {
+            "name": "Kitchen",
+            "members": [first_entity.entity_id, second_entity.entity_id],
+        },
+    )
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["title"] == "Kitchen"
+    assert result["data"][CONF_ENTRY_TYPE] == ENTRY_TYPE_PARALLEL_GROUP
+    assert result["data"][CONF_GROUP_ID]
+    assert result["data"][CONF_MEMBERS] == sorted((first.entry_id, second.entry_id))
