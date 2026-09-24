@@ -63,16 +63,10 @@ def _home_assistant_version(source: Path) -> str:
             raise ValueError(msg)
         components[name] = match.group(1).strip('"')
     patch = re.sub(r"([.]?(?:dev|a|b|rc|post)\d+)+$", "", components["PATCH_VERSION"])
-    return (
-        f"{components['MAJOR_VERSION']}."
-        f"{components['MINOR_VERSION']}."
-        f"{patch}"
-    )
+    return f"{components['MAJOR_VERSION']}.{components['MINOR_VERSION']}.{patch}"
 
 
-def _next_version(
-    source_version: str, destination: Path, source_revision: str
-) -> str:
+def _next_version(source_version: str, destination: Path, source_revision: str) -> str:
     """Return the next HACS release version for the source revision."""
 
     previous_metadata = _read_json(destination / PUBLISH_METADATA)
@@ -136,7 +130,7 @@ def _write_validation_workflow(destination: Path) -> None:
         "  push:\n"
         "  pull_request:\n"
         "  schedule:\n"
-        "    - cron: \"0 0 * * *\"\n"
+        '    - cron: "0 0 * * *"\n'
         "  workflow_dispatch:\n\n"
         "permissions: {}\n\n"
         "jobs:\n"
@@ -158,7 +152,7 @@ def _write_release_workflow(destination: Path) -> None:
         "on:\n"
         "  push:\n"
         "    tags:\n"
-        "      - \"*-v0.0.*\"\n\n"
+        '      - "*-v0.0.*"\n\n'
         "permissions:\n"
         "  contents: write\n\n"
         "jobs:\n"
@@ -166,7 +160,7 @@ def _write_release_workflow(destination: Path) -> None:
         "    runs-on: ubuntu-latest\n"
         "    steps:\n"
         "      - name: Create GitHub Release\n"
-        f"        run: gh release create \"$GITHUB_REF_NAME\" --generate-notes --repo {REPOSITORY}\n"
+        f'        run: gh release create "$GITHUB_REF_NAME" --generate-notes --repo {REPOSITORY}\n'
         "        env:\n"
         "          GH_TOKEN: ${{ github.token }}\n"
     )
@@ -183,9 +177,7 @@ def _clear_generated_content(destination: Path) -> None:
             path.unlink()
 
 
-def export_distribution(
-    source: Path, destination: Path, source_revision: str
-) -> str:
+def export_distribution(source: Path, destination: Path, source_revision: str) -> str:
     """Write one complete HACS custom-integration repository."""
     translation = source / "translations" / "en.json"
     if not translation.is_file():
