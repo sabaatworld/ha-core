@@ -256,6 +256,12 @@
       }
     },
     "select": {
+      "delay_end": {
+        "name": "Delay end",
+        "state": {
+          "off": "[%key:common::state::off%]"
+        }
+      },
       "detergent_amount": {
         "name": "Detergent dispense amount",
         "state": {
@@ -264,6 +270,14 @@
           "less": "Less",
           "none": "[%key:common::state::off%]",
           "standard": "Standard"
+        }
+      },
+      "detergent_density": {
+        "name": "Detergent dispense density",
+        "state": {
+          "extra_high": "Extra high",
+          "high": "High",
+          "normal": "Normal"
         }
       },
       "dishwasher_washing_course": {
@@ -304,6 +318,14 @@
       "dust_filter_alarm": {
         "name": "Dust filter alarm threshold",
         "unit_of_measurement": "hours"
+      },
+      "extra_rinse": {
+        "name": "Extra rinse",
+        "state": {
+          "not_reported": "Not Reported",
+          "off": "[%key:common::state::off%]",
+          "on": "[%key:common::state::on%]"
+        }
       },
       "flexible_detergent_amount": {
         "name": "Flexible compartment dispense amount",
@@ -377,6 +399,23 @@
           "upper": "Upper"
         }
       },
+      "softener_amount": {
+        "name": "Softener dispense amount",
+        "state": {
+          "extra": "Extra",
+          "less": "Less",
+          "none": "[%key:common::state::off%]",
+          "standard": "Standard"
+        }
+      },
+      "softener_density": {
+        "name": "Softener dispense density",
+        "state": {
+          "extra_high": "Extra high",
+          "high": "High",
+          "normal": "Normal"
+        }
+      },
       "soil_level": {
         "name": "Soil level",
         "state": {
@@ -419,6 +458,9 @@
           "none": "None",
           "rinse_hold": "Rinse hold"
         }
+      },
+      "washer_cycle": {
+        "name": "Cycle"
       },
       "water_temperature": {
         "name": "Water temperature",
@@ -1109,6 +1151,9 @@
       },
       "sanitizing_wash": {
         "name": "Sanitizing wash"
+      },
+      "sound": {
+        "name": "Sound"
       },
       "sound_detection": {
         "name": "Sound detection"

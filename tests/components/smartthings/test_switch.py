@@ -641,3 +641,13 @@ async def test_turn_on_with_wrong_dishwasher_cycle(
             blocking=True,
         )
     devices.execute_device_command.assert_not_called()
+
+
+@pytest.mark.parametrize("device_fixture", ["washer_us_table02"])
+async def test_bubble_soak_absent_sound_present(
+    hass: HomeAssistant, devices: AsyncMock, mock_config_entry: MockConfigEntry
+) -> None:
+    """Verify bubble soak gated off while sound stays on."""
+    await setup_integration(hass, mock_config_entry)
+    assert hass.states.get("switch.theater_washer_bubble_soak") is None
+    assert hass.states.get("switch.theater_washer_sound") is not None

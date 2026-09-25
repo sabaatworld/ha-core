@@ -148,6 +148,12 @@ DISHWASHER_WASHING_COURSE_TO_HA = {
     "machineCare": "machine_care",
 }
 
+DENSITY_TO_HA = {
+    "normal": "normal",
+    "high": "high",
+    "extraHigh": "extra_high",
+}
+
 
 @dataclass(frozen=True, kw_only=True)
 class SmartThingsSelectDescription(SelectEntityDescription):
@@ -195,14 +201,6 @@ CAPABILITIES_TO_SELECT: dict[Capability | str, SmartThingsSelectDescription] = {
         status_attribute=Attribute.MACHINE_STATE,
         command=Command.SET_MACHINE_STATE,
         default_options=["run", "pause", "stop"],
-    ),
-    Capability.SAMSUNG_CE_AUTO_DISPENSE_DETERGENT: SmartThingsSelectDescription(
-        key=Capability.SAMSUNG_CE_AUTO_DISPENSE_DETERGENT,
-        translation_key="detergent_amount",
-        options_attribute=Attribute.SUPPORTED_AMOUNT,
-        status_attribute=Attribute.AMOUNT,
-        command=Command.SET_AMOUNT,
-        entity_category=EntityCategory.CONFIG,
     ),
     Capability.SAMSUNG_CE_DISHWASHER_WASHING_COURSE: SmartThingsSelectDescription(
         key=Capability.SAMSUNG_CE_DISHWASHER_WASHING_COURSE,
@@ -318,6 +316,14 @@ CAPABILITIES_TO_SELECT: dict[Capability | str, SmartThingsSelectDescription] = {
         options_map=CLEANING_TYPE_TO_HA,
         entity_category=EntityCategory.CONFIG,
     ),
+    Capability.LAUNDRY_WASHER_RINSE_MODE: SmartThingsSelectDescription(
+        key=Capability.LAUNDRY_WASHER_RINSE_MODE,
+        translation_key="extra_rinse",
+        options_attribute=Attribute.SUPPORTED_RINSE_MODES,
+        status_attribute=Attribute.RINSE_MODE,
+        command=Command.SET_RINSE_MODE,
+        entity_category=EntityCategory.CONFIG,
+    ),
 }
 DISHWASHER_WASHING_OPTIONS_TO_SELECT: dict[
     Attribute | str, SmartThingsSelectDescription
@@ -341,6 +347,57 @@ DISHWASHER_WASHING_OPTIONS_TO_SELECT: dict[
         entity_category=EntityCategory.CONFIG,
         requires_remote_control_status=True,
         requires_dishwasher_machine_state="stop",
+    ),
+}
+
+AUTO_DISPENSE_TO_SELECT: dict[
+    tuple[Capability, Attribute], SmartThingsSelectDescription
+] = {
+    (
+        Capability.SAMSUNG_CE_AUTO_DISPENSE_DETERGENT,
+        Attribute.AMOUNT,
+    ): SmartThingsSelectDescription(
+        key=Capability.SAMSUNG_CE_AUTO_DISPENSE_DETERGENT,
+        translation_key="detergent_amount",
+        options_attribute=Attribute.SUPPORTED_AMOUNT,
+        status_attribute=Attribute.AMOUNT,
+        command=Command.SET_AMOUNT,
+        entity_category=EntityCategory.CONFIG,
+    ),
+    (
+        Capability.SAMSUNG_CE_AUTO_DISPENSE_DETERGENT,
+        Attribute.DENSITY,
+    ): SmartThingsSelectDescription(
+        key=Capability.SAMSUNG_CE_AUTO_DISPENSE_DETERGENT,
+        translation_key="detergent_density",
+        options_attribute=Attribute.SUPPORTED_DENSITY,
+        status_attribute=Attribute.DENSITY,
+        command=Command.SET_DENSITY,
+        options_map=DENSITY_TO_HA,
+        entity_category=EntityCategory.CONFIG,
+    ),
+    (
+        Capability.SAMSUNG_CE_AUTO_DISPENSE_SOFTENER,
+        Attribute.AMOUNT,
+    ): SmartThingsSelectDescription(
+        key=Capability.SAMSUNG_CE_AUTO_DISPENSE_SOFTENER,
+        translation_key="softener_amount",
+        options_attribute=Attribute.SUPPORTED_AMOUNT,
+        status_attribute=Attribute.AMOUNT,
+        command=Command.SET_AMOUNT,
+        entity_category=EntityCategory.CONFIG,
+    ),
+    (
+        Capability.SAMSUNG_CE_AUTO_DISPENSE_SOFTENER,
+        Attribute.DENSITY,
+    ): SmartThingsSelectDescription(
+        key=Capability.SAMSUNG_CE_AUTO_DISPENSE_SOFTENER,
+        translation_key="softener_density",
+        options_attribute=Attribute.SUPPORTED_DENSITY,
+        status_attribute=Attribute.DENSITY,
+        command=Command.SET_DENSITY,
+        options_map=DENSITY_TO_HA,
+        entity_category=EntityCategory.CONFIG,
     ),
 }
 
@@ -392,7 +449,259 @@ async def async_setup_entry(
         )
         if attribute in DISHWASHER_WASHING_OPTIONS_TO_SELECT
     )
+    entities.extend(
+        SmartThingsSelectEntity(entry_data.client, device, description, MAIN)
+        for (capability, _), description in AUTO_DISPENSE_TO_SELECT.items()
+        for device in entry_data.devices.values()
+        if capability in device.status[MAIN]
+    )
+    entities.extend(
+        SmartThingsWasherCycleSelectEntity(entry_data.client, device)
+        for device in entry_data.devices.values()
+        if Capability.CUSTOM_SUPPORTED_OPTIONS in device.status[MAIN]
+        and Capability.SAMSUNG_CE_WASHER_CYCLE in device.status[MAIN]
+    )
+    entities.extend(
+        SmartThingsWasherExtraRinseSelectEntity(entry_data.client, device)
+        for device in entry_data.devices.values()
+        if Capability.EXECUTE in device.status[MAIN]
+        and Capability.CUSTOM_SUPPORTED_OPTIONS in device.status[MAIN]
+        and Capability.SAMSUNG_CE_WASHER_CYCLE in device.status[MAIN]
+        and Capability.CUSTOM_WASHER_RINSE_CYCLES not in device.status[MAIN]
+        and Capability.LAUNDRY_WASHER_RINSE_MODE not in device.status[MAIN]
+    )
+    entities.extend(
+        SmartThingsWasherDelayEndSelectEntity(entry_data.client, device)
+        for device in entry_data.devices.values()
+        if Capability.SAMSUNG_CE_WASHER_DELAY_END in device.status[MAIN]
+        and Capability.REMOTE_CONTROL_STATUS in device.status[MAIN]
+    )
     async_add_entities(entities)
+
+
+WASHER_CYCLE_TABLE_02: dict[str, str] = {
+    # Friendly names are not exposed by the Cloud API, so this label layer is
+    # assembled from community sources (localthings Table_02 catalog,
+    # wilbiev/smartthingswasher US course table) cross-checked against the
+    # SmartThings app. Codes absent here fall back to their raw 2-char form.
+    "01": "Normal",
+    "8C": "AI OptiWash",
+    "53": "Heavy Duty",
+    "51": "Super Speed",
+    "5B": "Small Load",
+    "57": "Delicates",
+    "64": "Steam Whites",
+    "5A": "Steam Sanitize",
+    "85": "Steam Normal",
+    "54": "Towels",
+    "56": "Bedding",
+    "5C": "Outdoor",
+    "55": "Activewear",
+    "66": "Denim",
+    "58": "Wool",
+    "65": "Colors",
+    "59": "Perm Press",
+    "52": "Eco Cold",
+    "68": "Steam Bulky",
+    "67": "Steam Allergen",
+    "63": "Power Steam",
+    "5D": "Power Rinse",
+    "5F": "Spin Only",
+    "5E": "Rinse+Spin",
+    "60": "Self Clean+",
+}
+
+
+class SmartThingsWasherCycleSelectEntity(SmartThingsEntity, SelectEntity):
+    """Washer course select (two commands)."""
+
+    _attr_translation_key = "washer_cycle"
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, client: SmartThings, device: FullDevice) -> None:
+        """Initialize the instance."""
+        super().__init__(
+            client,
+            device,
+            {Capability.CUSTOM_SUPPORTED_OPTIONS, Capability.SAMSUNG_CE_WASHER_CYCLE},
+        )
+        self._attr_unique_id = f"{device.device.device_id}_{MAIN}_washer_cycle"
+        self._last_course: str | None = None
+
+    def _label(self, code: str) -> str:
+        """Return a friendly name for a course code, or the code itself."""
+        return WASHER_CYCLE_TABLE_02.get(code, code)
+
+    def _resolve(self, option: str) -> str:
+        """Resolve a display option (name or raw code) back to a course code."""
+        return next(
+            (code for code, name in WASHER_CYCLE_TABLE_02.items() if name == option),
+            option,
+        )
+
+    @property
+    @override
+    def options(self) -> list[str]:
+        """Return the list of options."""
+        return [
+            self._label(code)
+            for code in (
+                self.get_attribute_value(
+                    Capability.CUSTOM_SUPPORTED_OPTIONS, Attribute.SUPPORTED_COURSES
+                )
+                or []
+            )
+        ]
+
+    @property
+    @override
+    def current_option(self) -> str | None:
+        """Return the current option.
+
+        The device briefly clears ``course`` while it applies a new cycle, so
+        the last known course is cached to avoid a transient "unknown".
+        """
+        course = self.get_attribute_value(
+            Capability.CUSTOM_SUPPORTED_OPTIONS, Attribute.COURSE
+        )
+        if course is None:
+            washer_cycle = self.get_attribute_value(
+                Capability.SAMSUNG_CE_WASHER_CYCLE, Attribute.WASHER_CYCLE
+            )
+            if isinstance(washer_cycle, str) and "_Course_" in washer_cycle:
+                course = washer_cycle.rsplit("_Course_", 1)[-1]
+        if course is None:
+            course = self._last_course
+        else:
+            self._last_course = course
+        return self._label(course) if course is not None else None
+
+    @override
+    async def async_select_option(self, option: str) -> None:
+        """Select an option."""
+        code = self._resolve(option)
+        supported = (
+            self.get_attribute_value(
+                Capability.CUSTOM_SUPPORTED_OPTIONS, Attribute.SUPPORTED_COURSES
+            )
+            or []
+        )
+        if code not in supported:
+            raise ServiceValidationError(f"Unsupported cycle for this washer: {option}")
+        ref = self.get_attribute_value(
+            Capability.CUSTOM_SUPPORTED_OPTIONS, Attribute.REFERENCE_TABLE
+        )
+        table_id = ref.get("id") if isinstance(ref, dict) else None
+        if not table_id:
+            raise ServiceValidationError(
+                "Washer does not expose a reference table; file diagnostics "
+                "including custom.supportedOptions and samsungce.washerCycle status"
+            )
+        await self.execute_device_command(
+            Capability.CUSTOM_SUPPORTED_OPTIONS, Command.SET_COURSE, code
+        )
+        await self.execute_device_command(
+            Capability.SAMSUNG_CE_WASHER_CYCLE,
+            Command.SET_WASHER_CYCLE,
+            f"{table_id}_Course_{code}",
+        )
+
+
+class SmartThingsWasherDelayEndSelectEntity(SmartThingsEntity, SelectEntity):
+    """Delay end as 15-minute-step select (remote-gated)."""
+
+    _attr_translation_key = "delay_end"
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, client: SmartThings, device: FullDevice) -> None:
+        """Initialize the instance."""
+        super().__init__(
+            client,
+            device,
+            {Capability.SAMSUNG_CE_WASHER_DELAY_END, Capability.REMOTE_CONTROL_STATUS},
+        )
+        self._attr_unique_id = f"{device.device.device_id}_{MAIN}_washer_delay_end"
+
+    @property
+    @override
+    def options(self) -> list[str]:
+        """Return the list of options."""
+        minimum = (
+            self.get_attribute_value(
+                Capability.SAMSUNG_CE_WASHER_DELAY_END,
+                Attribute.MINIMUM_RESERVABLE_TIME,
+            )
+            or 0
+        )
+        start = ((int(minimum) + 14) // 15) * 15
+        return ["off", *[str(v) for v in range(start, 1441, 15)]]
+
+    @property
+    @override
+    def current_option(self) -> str | None:
+        """Return the current option."""
+        remaining = self.get_attribute_value(
+            Capability.SAMSUNG_CE_WASHER_DELAY_END, Attribute.REMAINING_TIME
+        )
+        if not remaining:
+            return "off"
+        options = [int(o) for o in self.options if o != "off"]
+        nearest = min(options, key=lambda v: abs(v - int(remaining)))
+        return str(nearest)
+
+    @override
+    async def async_select_option(self, option: str) -> None:
+        """Select an option."""
+        if Capability.REMOTE_CONTROL_STATUS not in self._internal_state:
+            raise ServiceValidationError(
+                "Can only be updated when remote control is enabled"
+            )
+        if (
+            self.get_attribute_value(
+                Capability.REMOTE_CONTROL_STATUS, Attribute.REMOTE_CONTROL_ENABLED
+            )
+            == "false"
+        ):
+            raise ServiceValidationError(
+                "Can only be updated when remote control is enabled"
+            )
+        await self.execute_device_command(
+            Capability.SAMSUNG_CE_WASHER_DELAY_END,
+            Command.SET_DELAY_TIME,
+            0 if option == "off" else int(option),
+        )
+
+
+class SmartThingsWasherExtraRinseSelectEntity(SmartThingsEntity, SelectEntity):
+    """Washer extra-rinse control backed by a private course option."""
+
+    _attr_translation_key = "extra_rinse"
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_options = ["not_reported", "off", "on"]
+    _attr_current_option = "not_reported"
+
+    def __init__(self, client: SmartThings, device: FullDevice) -> None:
+        """Initialize the instance."""
+        super().__init__(client, device, {Capability.EXECUTE})
+        self._attr_unique_id = f"{device.device.device_id}_{MAIN}_extra_rinse"
+
+    @override
+    async def async_select_option(self, option: str) -> None:
+        """Select an option."""
+        if option == "not_reported":
+            return
+        await self.execute_device_command(
+            Capability.EXECUTE,
+            Command.EXECUTE,
+            [
+                "course/vs/0",
+                {
+                    "x.com.samsung.da.options": [
+                        f"ExtraRinse_{'On' if option == 'on' else 'Off'}"
+                    ]
+                },
+            ],
+        )
 
 
 class SmartThingsSelectEntity(SmartThingsEntity, SelectEntity):

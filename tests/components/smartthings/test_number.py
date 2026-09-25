@@ -124,3 +124,21 @@ async def test_availability_at_start(
     assert (
         hass.states.get("number.theater_washer_rinse_cycles").state == STATE_UNAVAILABLE
     )
+
+
+@pytest.mark.parametrize("device_fixture", ["da_wm_wm_000001"])
+async def test_rinse_cycles_number_present(
+    hass: HomeAssistant, devices: AsyncMock, mock_config_entry: MockConfigEntry
+) -> None:
+    """Rinse-count number exists where the capability is enabled (Extra-rinse control)."""
+    await setup_integration(hass, mock_config_entry)
+    assert hass.states.get("number.theater_washer_rinse_cycles") is not None
+
+
+@pytest.mark.parametrize("device_fixture", ["washer_us_table02"])
+async def test_rinse_cycles_number_absent_when_disabled(
+    hass: HomeAssistant, devices: AsyncMock, mock_config_entry: MockConfigEntry
+) -> None:
+    """A disabled rinse-count capability does not create a number entity."""
+    await setup_integration(hass, mock_config_entry)
+    assert hass.states.get("number.theater_washer_rinse_cycles") is None

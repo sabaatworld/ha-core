@@ -47,7 +47,7 @@ class SmartThingsSwitchEntityDescription(SwitchEntityDescription):
 
     status_attribute: Attribute
     component_translation_key: dict[str, str] | None = None
-    on_key: str | bool = "on"
+    on_key: str | bool | int = "on"
     on_command: Command = Command.ON
     off_command: Command = Command.OFF
 
@@ -57,7 +57,7 @@ class SmartThingsCommandSwitchEntityDescription(SmartThingsSwitchEntityDescripti
     """Describe a SmartThings switch entity."""
 
     command: Command
-    off_key: str | bool = "off"
+    off_key: str | bool | int = "off"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -100,6 +100,15 @@ CAPABILITY_TO_COMMAND_SWITCHES: dict[
         status_attribute=Attribute.DRYER_WRINKLE_PREVENT,
         command=Command.SET_DRYER_WRINKLE_PREVENT,
         entity_category=EntityCategory.CONFIG,
+    ),
+    Capability.SAMSUNG_CE_AUDIO_VOLUME_LEVEL: SmartThingsCommandSwitchEntityDescription(
+        key=Capability.SAMSUNG_CE_AUDIO_VOLUME_LEVEL,
+        translation_key="sound",
+        status_attribute=Attribute.VOLUME_LEVEL,
+        command=Command.SET_VOLUME_LEVEL,
+        entity_category=EntityCategory.CONFIG,
+        on_key=1,
+        off_key=0,
     ),
     Capability.SAMSUNG_CE_STEAM_CLOSET_AUTO_CYCLE_LINK: (
         SmartThingsCommandSwitchEntityDescription(

@@ -94,11 +94,20 @@
       }
     },
     "select": {
+      "delay_end": {
+        "default": "mdi:timer-outline"
+      },
       "detergent_amount": {
         "default": "mdi:car-coolant-level"
       },
+      "detergent_density": {
+        "default": "mdi:beaker-outline"
+      },
       "dishwasher_washing_course": {
         "default": "mdi:dishwasher"
+      },
+      "extra_rinse": {
+        "default": "mdi:repeat"
       },
       "flexible_detergent_amount": {
         "default": "mdi:car-coolant-level"
@@ -137,6 +146,12 @@
           "upper": "mdi:dock-top"
         }
       },
+      "softener_amount": {
+        "default": "mdi:beaker-outline"
+      },
+      "softener_density": {
+        "default": "mdi:beaker-outline"
+      },
       "soil_level": {
         "default": "mdi:liquid-spot"
       },
@@ -145,6 +160,9 @@
       },
       "spin_level": {
         "default": "mdi:rotate-right"
+      },
+      "washer_cycle": {
+        "default": "mdi:washing-machine"
       },
       "water_temperature": {
         "default": "mdi:water-thermometer"
@@ -260,6 +278,9 @@
       },
       "sanitizing_wash": {
         "default": "mdi:lotion"
+      },
+      "sound": {
+        "default": "mdi:volume-high"
       },
       "sound_detection": {
         "default": "mdi:home-sound-in"

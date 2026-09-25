@@ -14,6 +14,9 @@ from homeassistant.components.select import (
     SERVICE_SELECT_OPTION,
 )
 from homeassistant.components.smartthings import MAIN
+from homeassistant.components.smartthings.select import (
+    SmartThingsWasherCycleSelectEntity,
+)
 from homeassistant.const import ATTR_ENTITY_ID, STATE_UNAVAILABLE, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
@@ -318,6 +321,156 @@ async def test_select_dishwasher_washing_option_with_wrong_machine_state(
             blocking=True,
         )
     devices.execute_device_command.assert_not_called()
+
+
+@pytest.mark.parametrize("device_fixture", ["washer_us_table02"])
+async def test_washer_cycle_select_sends_both_commands(
+    hass: HomeAssistant, devices: AsyncMock, mock_config_entry: MockConfigEntry
+) -> None:
+    """Selecting Heavy Duty sends setCourse(53) then setWasherCycle(<table>_Course_53)."""
+    await setup_integration(hass, mock_config_entry)
+    entity_id = "select.theater_washer_cycle"
+    assert hass.states.get(entity_id) is not None
+    await hass.services.async_call(
+        "select",
+        "select_option",
+        {"entity_id": entity_id, "option": "Heavy Duty"},
+        blocking=True,
+    )
+    calls = devices.execute_device_command.await_args_list
+    assert calls[0].args[1] == Capability.CUSTOM_SUPPORTED_OPTIONS
+    assert calls[0].args[2] == Command.SET_COURSE
+    assert calls[0].args[3] == MAIN
+    assert calls[0].kwargs["argument"] == "53"
+    assert calls[1].args[1] == Capability.SAMSUNG_CE_WASHER_CYCLE
+    assert calls[1].args[2] == Command.SET_WASHER_CYCLE
+    assert calls[1].kwargs["argument"].endswith("_Course_53")
+
+
+@pytest.mark.parametrize("device_fixture", ["washer_us_table02"])
+async def test_washer_cycle_select_accepts_raw_code(
+    hass: HomeAssistant, devices: AsyncMock, mock_config_entry: MockConfigEntry
+) -> None:
+    """Raw codes without a friendly label remain selectable as-is."""
+    await setup_integration(hass, mock_config_entry)
+    await hass.services.async_call(
+        "select",
+        "select_option",
+        {"entity_id": "select.theater_washer_cycle", "option": "F2"},
+        blocking=True,
+    )
+    first = devices.execute_device_command.await_args_list[0]
+    assert first.args[2] == Command.SET_COURSE
+    assert first.kwargs["argument"] == "F2"
+
+
+@pytest.mark.parametrize("device_fixture", ["washer_us_table02"])
+async def test_washer_cycle_current_option_caches_transient_none(
+    hass: HomeAssistant, devices: AsyncMock, mock_config_entry: MockConfigEntry
+) -> None:
+    """A transient cleared course falls back to the last known value."""
+    await setup_integration(hass, mock_config_entry)
+    entry_data = mock_config_entry.runtime_data
+    device = next(iter(entry_data.devices.values()))
+    entity = SmartThingsWasherCycleSelectEntity(entry_data.client, device)
+    assert entity.current_option == "Normal"
+    entity._internal_state[Capability.CUSTOM_SUPPORTED_OPTIONS][
+        Attribute.COURSE
+    ].value = None
+    entity._internal_state[Capability.SAMSUNG_CE_WASHER_CYCLE][
+        Attribute.WASHER_CYCLE
+    ].value = None
+    assert entity.current_option == "Normal"
+
+
+@pytest.mark.parametrize("device_fixture", ["washer_us_table02"])
+async def test_dispenser_selects_exist(
+    hass: HomeAssistant, devices: AsyncMock, mock_config_entry: MockConfigEntry
+) -> None:
+    """Verify dispenser selects exist."""
+    await setup_integration(hass, mock_config_entry)
+    assert (
+        hass.states.get("select.theater_washer_detergent_dispense_density") is not None
+    )
+    assert hass.states.get("select.theater_washer_softener_dispense_amount") is not None
+    assert (
+        hass.states.get("select.theater_washer_softener_dispense_density") is not None
+    )
+
+
+@pytest.mark.parametrize(
+    ("option", "token"),
+    [("off", "ExtraRinse_Off"), ("on", "ExtraRinse_On")],
+)
+@pytest.mark.parametrize("device_fixture", ["washer_us_table02"])
+async def test_extra_rinse_select_sends_hidden_execute_command(
+    hass: HomeAssistant,
+    devices: AsyncMock,
+    mock_config_entry: MockConfigEntry,
+    option: str,
+    token: str,
+) -> None:
+    """Extra rinse uses the private course option carried by execute."""
+    await setup_integration(hass, mock_config_entry)
+    entity_id = "select.theater_washer_extra_rinse"
+
+    state = hass.states.get(entity_id)
+    assert state is not None
+    assert state.state == "not_reported"
+    assert state.attributes[ATTR_OPTIONS] == ["not_reported", "off", "on"]
+
+    await hass.services.async_call(
+        SELECT_DOMAIN,
+        SERVICE_SELECT_OPTION,
+        {ATTR_ENTITY_ID: entity_id, ATTR_OPTION: option},
+        blocking=True,
+    )
+
+    devices.execute_device_command.assert_called_once_with(
+        "12345678-abcd-ef01-2345-6789abcdef01",
+        Capability.EXECUTE,
+        Command.EXECUTE,
+        MAIN,
+        argument=[
+            "course/vs/0",
+            {"x.com.samsung.da.options": [token]},
+        ],
+    )
+    assert hass.states.get(entity_id).state == "not_reported"
+
+
+@pytest.mark.parametrize("device_fixture", ["washer_us_table02"])
+async def test_extra_rinse_select_can_clear_last_command(
+    hass: HomeAssistant, devices: AsyncMock, mock_config_entry: MockConfigEntry
+) -> None:
+    """Not Reported clears the optimistic value without sending a command."""
+    await setup_integration(hass, mock_config_entry)
+    entity_id = "select.theater_washer_extra_rinse"
+
+    await hass.services.async_call(
+        SELECT_DOMAIN,
+        SERVICE_SELECT_OPTION,
+        {ATTR_ENTITY_ID: entity_id, ATTR_OPTION: "not_reported"},
+        blocking=True,
+    )
+
+    assert hass.states.get(entity_id).state == "not_reported"
+    devices.execute_device_command.assert_not_called()
+
+
+@pytest.mark.parametrize("device_fixture", ["washer_us_table02"])
+async def test_delay_end_requires_remote(
+    hass: HomeAssistant, devices: AsyncMock, mock_config_entry: MockConfigEntry
+) -> None:
+    """Verify delay end requires remote control."""
+    await setup_integration(hass, mock_config_entry)
+    with pytest.raises(ServiceValidationError, match="remote control"):
+        await hass.services.async_call(
+            "select",
+            "select_option",
+            {"entity_id": "select.theater_washer_delay_end", "option": "60"},
+            blocking=True,
+        )
 
 
 @pytest.mark.parametrize("device_fixture", ["da_wm_dw_01011"])
