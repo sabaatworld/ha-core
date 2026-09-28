@@ -92,7 +92,7 @@ Follow `select.py:152 SmartThingsSelectDescription` (`key`, `options_attribute`,
 
 - Update `test_select.py` (+ exact hidden Extra Rinse payload in both directions, remote-gate on delay end, cycle two-command sequence), `test_switch.py` (sound stays; bubble-soak only if capability present), snapshots via syrupy.
 - Delete service tests with the service. No new fixture unless a missing capability appears live — reuse existing washer fixtures.
-- Live verification (user-confirmed only, via HA MCP + `script/sync_custom_component.sh <ha-host> smartthings`): read-only status compare, then select cycle, dispenser, delay (remote off → error; on → accepted), sound toggle read-back.
+- Live verification (user-confirmed only, via HA MCP): read-only status compare, then select cycle, dispenser, delay (remote off → error; on → accepted), sound toggle read-back.
 
 ## 9. Risks
 

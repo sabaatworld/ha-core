@@ -27,7 +27,7 @@ Squash groups by final tree state (`cea0a35613d..HEAD`, 44 files):
 - **Commit A — runtime:** `homeassistant/components/lifx/{__init__,button,config_flow,const,coordinator,diagnostics,light,manager,number.py(new),parallel.py(new),parallel_group.py(new),strings.json,translations/en.json}`, `tests/components/lifx/{test_config_flow,test_light,test_number(new),test_parallel(new),test_parallel_group(new)}.py`
 - **Commit B — HACS:** `.github/workflows/publish-lifx-ultimate.yml`, `.gitignore`, `homeassistant/components/lifx/{manifest.json,README_FEATURES.md,brand/icon.png}`, `script/lifx_ultimate_hacs_export.py`, `script/lifx_ultimate_hacs_assets/LICENSE`, `tests/components/lifx/test_hacs_export.py`
 - **Commit C — docs:** `docs/superpowers/plans/2026-07-1*.md` (10 files), `docs/superpowers/specs/2026-07-*.md` (4 files)
-- **Commit D — tooling:** `script/sync_custom_component.sh`, `AGENTS.md`, `CLAUDE.md`
+- **Commit D — instructions:** `AGENTS.md`, `CLAUDE.md`
 - **Conflict epicenter:** upstream `a3b9ccc22fc` (lifx-async migration, 38 files, ~13k insertions) rewrites every file Commit A touches.
 
 ---
@@ -147,12 +147,12 @@ git commit -m "docs(lifx): group reliability and HACS distribution plans"
 Run: commands above.
 Expected: commit succeeds. If any listed docs file errors as missing, list actual leftovers with `git status --short` and `git add docs/superpowers` for exactly those leftovers, then commit.
 
-- [ ] **Step 6: Commit D — sync script and dev-docs consolidation**
+- [ ] **Step 6: Commit D — dev-docs consolidation**
 
 ```bash
-git add script/sync_custom_component.sh AGENTS.md CLAUDE.md
+git add AGENTS.md CLAUDE.md
 git status --short
-git commit -m "chore(lifx): custom-component sync script and dev docs consolidation"
+git commit -m "chore(lifx): dev docs consolidation"
 ```
 
 Run: commands above.

@@ -17,24 +17,6 @@ packaged integration. Keep it a drop-in replacement:
   override is not blocked; the HACS exporter replaces it with the derived
   version.
 
-Development happens in this checkout at `homeassistant/components/lifx`. Deploy
-to the Home Assistant host over SSH with:
-
-```sh
-script/sync_custom_component.sh <ha-host> lifx
-```
-
-`<ha-host>` is the Home Assistant host address. Use it if you know it; otherwise ask the user.
-The script syncs the source into `/config/custom_components/lifx` (excluding
-caches and `strings.json`), restarts Home Assistant, then verifies startup by
-reporting `ha core info` and the recent `lifx`/`blocked`/`error` log lines.
-Regenerate `translations/en.json` before syncing if you edited `strings.json`
-(see Testing below).
-
-On startup, the "custom integration ... has not been tested" warning is expected.
-A "blocked from loading" or different-domain message is not expected and should
-be investigated before continuing.
-
 ## Git Commit Guidelines
 
 - **Do NOT amend, squash, or rebase commits that have already been pushed to the PR branch after the PR is opened** - Reviewers need to follow the commit history, as well as see what changed since their last review

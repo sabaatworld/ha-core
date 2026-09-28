@@ -6,7 +6,7 @@
 
 **Architecture:** Delete service files and revert service plumbing; add a bespoke cycle select subclass (two commands), a secondary auto-dispense select map (amount+density fan-out), a write-only Extra Rinse select over the generic `execute` capability, keep the capability-gated bubble-soak switch for other models, and add a bespoke 15-minute-step delay-end select with remote gating. All `EntityCategory.CONFIG`, existing `ServiceValidationError` patterns.
 
-**Tech Stack:** Python 3.14, Home Assistant select/switch/number entity patterns, `pysmartthings==4.0.3` (`Capability`, `Command`, `Attribute`), pytest + syrupy, `script.translations`, hassfest, `script/sync_custom_component.sh`.
+**Tech Stack:** Python 3.14, Home Assistant select/switch/number entity patterns, `pysmartthings==4.0.3` (`Capability`, `Command`, `Attribute`), pytest + syrupy, `script.translations`, hassfest.
 
 **Spec:** `docs/superpowers/specs/2026-09-24-washer-config-controls-design.md`
 
@@ -497,5 +497,6 @@ Select cycle `01`, dispenser density, Extra Rinse off/on, delay without remote (
 
 - [ ] **Step 3: Sync integration to HA**
 
-Run: `script/sync_custom_component.sh <ha-host> smartthings`
+Use the private HA workspace's custom-component deployment workflow for the
+SmartThings source directory.
 Then verify via HA MCP that new entities appear. Record `<ha-host>` used and `setCourse`/`setWasherCycle` order outcome back into the spec.
