@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from homeassistant.components.lifx.const import CONF_GROUP_ID, DOMAIN
+from homeassistant.components.lifx.const import CONF_GROUP_ID, CONF_MEMBERS, DOMAIN
 from homeassistant.components.lifx.coordinator import LIFXUpdateCoordinator
 from homeassistant.components.lifx.manager import SERVICE_EFFECT_MOVE
 from homeassistant.components.lifx.parallel import (
@@ -325,6 +325,85 @@ async def test_dispatch_does_not_schedule_a_physical_refresh(
     runtime.parallel.async_dispatch.assert_awaited_once()
     for member in members:
         member.async_schedule_post_command_refresh.assert_not_awaited()
+
+
+@pytest.mark.parametrize("power", [True, False])
+async def test_group_dispatch_preserves_real_coordinator_data(
+    hass: HomeAssistant, power: bool
+) -> None:
+    """Group notifications must not replace a physical member's typed state."""
+    physical_entry = MockConfigEntry(domain=DOMAIN, title="Physical member")
+    device = create_mock_light()
+    device.port = 56700
+    device.state.power = 65535
+    member = LIFXUpdateCoordinator(hass, physical_entry, device)
+    member.async_set_updated_data(device.state)
+    original_data = member.data
+    original_color = member.data.color
+    observed_states = []
+    remove_listener = member.async_add_listener(
+        lambda: observed_states.append(member.data)
+    )
+    group_entry = MockConfigEntry(domain=DOMAIN, data={CONF_GROUP_ID: "typed-state"})
+    runtime = LIFXParallelGroupRuntime(
+        hass,
+        group_entry,
+        (MagicMock(state=ConfigEntryState.LOADED, runtime_data=member),),
+        (member,),
+    )
+    runtime.parallel = MagicMock()
+    runtime.parallel.async_cancel_health = AsyncMock()
+    runtime.parallel.async_dispatch = AsyncMock(
+        return_value=ParallelDispatchResult(ParallelDispatchOutcome.COMPLETED, 1)
+    )
+    try:
+        await runtime.async_set_state(power=power, brightness=51)
+
+        assert member.data is original_data
+        assert member.data.color == original_color
+        assert member.data.power == 65535
+        assert member.virtual_off is not power
+        assert observed_states == [original_data]
+
+        await runtime.async_set_state(power=True, brightness=102)
+        assert member.data is original_data
+        assert not member.virtual_off
+        assert observed_states == [original_data, original_data]
+    finally:
+        remove_listener()
+        runtime._cancel_optimistic_expiry()
+        runtime._async_cancel_keepalive()
+
+
+@pytest.mark.enable_socket
+async def test_home_assistant_shutdown_stops_group_workers(hass: HomeAssistant) -> None:
+    """Normal HA shutdown must release real workers before Python joins children."""
+    member = _member("127.0.0.1")
+    physical_entry = MockConfigEntry(domain=DOMAIN, title="Shutdown member")
+    physical_entry.add_to_hass(hass)
+    physical_entry.runtime_data = member
+    physical_entry._async_set_state(hass, ConfigEntryState.LOADED, None)
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_GROUP_ID: "shutdown-group", CONF_MEMBERS: [physical_entry.entry_id]},
+    )
+    entry.add_to_hass(hass)
+    with patch.object(hass.config_entries, "async_forward_entry_setups"):
+        assert await async_setup_parallel_group_entry(hass, entry)
+    runtime = entry.runtime_data
+    processes = [worker.process for worker in runtime.parallel._workers]
+    dispatcher = runtime.parallel._dispatcher
+    assert runtime.parallel.available
+    assert dispatcher is not None
+    try:
+        await hass.async_stop()
+
+        assert runtime.stopped
+        assert not any(process.is_alive() for process in processes)
+        assert not dispatcher.is_alive()
+    finally:
+        await runtime.async_stop()
+        physical_entry._async_set_state(hass, ConfigEntryState.NOT_LOADED, None)
 
 
 async def test_optimistic_group_state_expires_without_mutating_members(

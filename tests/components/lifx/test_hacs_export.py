@@ -26,6 +26,8 @@ def test_export_creates_hacs_layout_without_core_only_files(tmp_path: Path) -> N
     _write_home_assistant_version(tmp_path)
     (source / "__init__.py").write_text('"""LIFX."""\n')
     (source / "light.py").write_text('"""Light platform."""\n')
+    bootstrap = '"""Spawn bootstrap."""\n'
+    (source / "_parallel_worker.py").write_text(bootstrap)
     (source / "AGENTS.md").write_text("Development instructions\n")
     (source / "README_FEATURES.md").write_text(
         "## ✨ Why LIFX Ultimate?\n\nFeature guide content.\n"
@@ -74,6 +76,7 @@ def test_export_creates_hacs_layout_without_core_only_files(tmp_path: Path) -> N
     integration = destination / "custom_components" / "lifx"
     assert (integration / "__init__.py").is_file()
     assert (integration / "light.py").is_file()
+    assert (integration / "_parallel_worker.py").read_text() == bootstrap
     assert (integration / "translations" / "en.json").is_file()
     assert (integration / "brand" / "icon.png").is_file()
     assert git_metadata.read_text() == "ref: refs/heads/main\n"
