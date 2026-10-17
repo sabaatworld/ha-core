@@ -4,6 +4,8 @@ Updated: 2026-10-15
 
 Design: [Worker bootstrap repair](../superpowers/specs/2026-10-15-lifx-custom-worker-bootstrap-design.md)
 Plan and detailed execution evidence: [Implementation plan](../superpowers/plans/2026-10-15-lifx-custom-worker-bootstrap.md)
+Virtual Power Off design: [Virtual Power Off design](../superpowers/specs/2026-10-16-lifx-virtual-power-off-design.md)
+Virtual Power Off implementation: [Implementation plan](../superpowers/plans/2026-10-16-lifx-virtual-power-off.md)
 
 ## Current integration and group
 

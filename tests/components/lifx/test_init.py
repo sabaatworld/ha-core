@@ -12,15 +12,68 @@ from homeassistant.components.lifx import DOMAIN
 from homeassistant.components.lifx.const import CONF_SERIAL
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import CONF_HOST, EVENT_HOMEASSISTANT_STARTED
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers import device_registry as dr
+from homeassistant.core import HomeAssistant, State
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 
 from . import IP_ADDRESS, SERIAL, _patch_config_flow_try_connect, async_setup_lifx_entry
 from .helpers import create_mock_light
 
-from tests.common import MockConfigEntry, async_fire_time_changed
+from tests.common import (
+    MockConfigEntry,
+    async_fire_time_changed,
+    mock_restore_cache_with_extra_data,
+)
+
+
+async def test_legacy_recovery_import_precedes_disabled_light_setup(
+    hass: HomeAssistant, entity_registry: er.EntityRegistry
+) -> None:
+    """Import by the registry ID, including a renamed and disabled light."""
+    device = create_mock_light()
+    device.state.color = device.state.color.replace(brightness=0)
+    device.state.power = 65535
+    entity_registry.async_get_or_create(
+        "light",
+        DOMAIN,
+        SERIAL,
+        suggested_object_id="renamed",
+        disabled_by=er.RegistryEntryDisabler.USER,
+    )
+    mock_restore_cache_with_extra_data(
+        hass,
+        [
+            (
+                State("light.renamed", "off"),
+                {
+                    "virtual_off": True,
+                    "resume_hsbk": {
+                        "hue": 20,
+                        "saturation": 0.5,
+                        "brightness": 0.7,
+                        "kelvin": 3500,
+                    },
+                },
+            )
+        ],
+    )
+    entry = await async_setup_lifx_entry(hass, device)
+    assert entry.runtime_data.virtual_off
+    assert entry.runtime_data.resume_required
+    assert entry.runtime_data.resume_hsbk.brightness == 0.7
+    assert hass.states.get("light.renamed") is None
+    entry.runtime_data.async_record_virtual_on(
+        device.state.color.replace(brightness=0.8)
+    )
+    revision = entry.runtime_data.virtual_power_record.revision
+    entity_registry.async_update_entity("light.renamed", disabled_by=None)
+    with patch("homeassistant.components.lifx.Device.connect", return_value=device):
+        await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done()
+    assert not entry.runtime_data.virtual_off
+    assert entry.runtime_data.virtual_power_record.revision == revision
+    assert entry.runtime_data.resume_hsbk.brightness == 0.8
 
 
 async def test_configuring_lifx_causes_discovery(hass: HomeAssistant) -> None:

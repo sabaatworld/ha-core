@@ -29,7 +29,7 @@ from lifx import (
     WifiInfo,
 )
 
-from homeassistant.components.lifx.light import LIFX_MIN_COLOR_RAMP
+from homeassistant.components.lifx.const import LIFX_MIN_COLOR_RAMP
 
 IP_ADDRESS = "127.0.0.1"
 SERIAL = "d073d5ddeecc"

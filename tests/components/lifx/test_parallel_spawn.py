@@ -102,3 +102,28 @@ def test_failed_custom_bootstrap_cleans_up_workers(tmp_path: Path) -> None:
     assert "closed unexpectedly" in evidence["startup_error"]
     assert evidence["children_stopped"] is True
     assert evidence["dispatcher_stopped"] is True
+
+
+@pytest.mark.parametrize("mode", ["builtin", "custom-mounted", "custom-exported"])
+def test_spawned_packet_batch_out_of_order_acks(tmp_path: Path, mode: str) -> None:
+    """New payload objects must unpickle and retain all ACKs in real workers."""
+    completed = run_probe(tmp_path, mode, "batch")
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    evidence = json.loads(completed.stdout)
+    assert evidence["batch_completed"]
+    assert evidence["packet_count"] == 2
+    assert evidence["children_stopped"]
+
+
+@pytest.mark.parametrize("mode", ["builtin", "custom-mounted", "custom-exported"])
+def test_spawned_cancellation_barrier_prevents_old_power_stage(
+    tmp_path: Path, mode: str
+) -> None:
+    """No delayed power-on may cross a newer physical command's barrier."""
+    completed = run_probe(tmp_path, mode, "cancel")
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    evidence = json.loads(completed.stdout)
+    assert evidence["cancelled"]
+    assert evidence["replacement_completed"]
+    assert evidence["packet_types"] == [102, 117]
+    assert evidence["children_stopped"]

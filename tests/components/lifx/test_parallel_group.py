@@ -1,16 +1,24 @@
 """Test LIFX Device Group behavior."""
 
 import asyncio
+from collections.abc import Callable
+from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from homeassistant.components.lifx.const import CONF_GROUP_ID, CONF_MEMBERS, DOMAIN
+from homeassistant.components.lifx.const import (
+    CONF_GROUP_ID,
+    CONF_MEMBERS,
+    DATA_LIFX_MANAGER,
+    DOMAIN,
+)
 from homeassistant.components.lifx.coordinator import LIFXUpdateCoordinator
-from homeassistant.components.lifx.manager import SERVICE_EFFECT_MOVE
+from homeassistant.components.lifx.manager import SERVICE_EFFECT_MOVE, LIFXManager
 from homeassistant.components.lifx.parallel import (
     ParallelCommand,
     ParallelDispatchOutcome,
+    ParallelDispatchOwner,
     ParallelDispatchResult,
     ParallelTransport,
 )
@@ -24,53 +32,93 @@ from homeassistant.components.lifx.parallel_group import (
 )
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.storage import Store
+from homeassistant.util import dt as dt_util
 
 from .helpers import create_mock_light
 
 from tests.common import MockConfigEntry
 
 
-def _member(ip_address: str, *, last_update_success: bool = True) -> MagicMock:
-    """Create a physical coordinator stand-in with an independent device cache."""
-    coordinator = MagicMock(spec=LIFXUpdateCoordinator)
-    device = create_mock_light()
-    device.ip = ip_address
-    device.serial = "aabbccddeecc"
+def _member(
+    hass: HomeAssistant, ip_address: str, *, last_update_success: bool = True
+) -> LIFXUpdateCoordinator:
+    """Keep physical state and recovery authority real; mock only the device."""
+    if DATA_LIFX_MANAGER not in hass.data:
+        hass.data[DATA_LIFX_MANAGER] = LIFXManager(hass)
+    serial = f"aabbccddee{int(ip_address.rsplit('.', 1)[1]):02x}"
+    device = create_mock_light(ip=ip_address, serial=serial)
     device.port = 56700
-    coordinator.device = device
-    coordinator.data = device.state
+    coordinator = LIFXUpdateCoordinator(hass, MockConfigEntry(domain=DOMAIN), device)
+    coordinator.async_set_updated_data(device.state)
     coordinator.last_update_success = last_update_success
-    coordinator.transition_on_duration = 0
-    coordinator.transition_off_duration = 0
-    coordinator.transition_cross_duration = 0
-    coordinator.virtual_off = False
-    coordinator.resume_hsbk = None
-    coordinator.async_record_virtual_off = MagicMock(
-        side_effect=lambda color: (
-            setattr(coordinator, "virtual_off", True)
-            or setattr(coordinator, "resume_hsbk", color)
-        )
-    )
-    coordinator.async_record_virtual_on = MagicMock(
-        side_effect=lambda color: (
-            setattr(coordinator, "virtual_off", False)
-            or setattr(coordinator, "resume_hsbk", color)
-        )
-    )
-    coordinator.async_schedule_post_command_refresh = AsyncMock()
     return coordinator
 
 
 def _transport(host: str) -> ParallelTransport:
     """Return the resolved physical transport used by a mock member."""
-    return ParallelTransport(host, 56700, b"\xaa\xbb\xcc\xdd\xee\xcc\x00\x00")
+    target = bytes.fromhex(f"aabbccddee{int(host.rsplit('.', 1)[1]):02x}")
+    return ParallelTransport(host, 56700, target.ljust(8, b"\0"))
+
+
+@pytest.mark.parametrize(
+    ("group_default", "member_default", "explicit", "expected"),
+    [
+        pytest.param(0, 0, None, 250, id="implicit-zero"),
+        pytest.param(0.1, 0, None, 250, id="implicit-short"),
+        pytest.param(0.8, 0, None, 800, id="implicit-long"),
+        pytest.param(0, 0.8, None, 800, id="member-inherited"),
+        pytest.param(0.8, 0.8, 0.0, 0, id="explicit-zero"),
+        pytest.param(0.8, 0.8, 0.1, 100, id="explicit-short"),
+        pytest.param(0.8, 0.8, 1.5, 1500, id="explicit-long"),
+    ],
+)
+async def test_group_ordinary_color_duration(
+    hass: HomeAssistant,
+    group_default: float,
+    member_default: float,
+    explicit: float | None,
+    expected: int,
+) -> None:
+    """Wire durations inherit first, then floor only implicit ordinary writes."""
+    runtime, members = _runtime(hass)
+    runtime.transition_cross_duration = group_default
+    for member in members:
+        member.data.power = 65535
+        member.transition_cross_duration = member_default
+    kwargs = {} if explicit is None else {"transition": explicit}
+    await runtime.async_set_state(brightness=128, **kwargs)
+    assert all(
+        command.payload[-1] == expected
+        for command in runtime.parallel.async_dispatch.await_args.args[0]
+    )
+
+
+async def test_group_hidden_color_and_power_stage_timing(hass: HomeAssistant) -> None:
+    """Hidden color is immediate and the final power stage keeps its short fade."""
+    runtime, members = _runtime(hass)
+    runtime.transition_on_duration = 0.1
+    await runtime.async_set_state(power=True, brightness=128)
+    commands = runtime.parallel.async_dispatch.await_args.args[0]
+    assert all(command.payload[-1] == 0 for command in commands)
+    assert all(command.second.payload == (True, 100) for command in commands)
+    for member in members:
+        member.data.power = 65535
+    runtime.transition_off_duration = 0.1
+    await runtime.async_set_state(power=False)
+    assert all(
+        command.payload[-1] == 100
+        for command in runtime.parallel.async_dispatch.await_args.args[0]
+    )
 
 
 def _runtime(
     hass: HomeAssistant,
-) -> tuple[LIFXParallelGroupRuntime, tuple[MagicMock, ...]]:
+    *,
+    group_policy: bool = True,
+) -> tuple[LIFXParallelGroupRuntime, tuple[LIFXUpdateCoordinator, ...]]:
     """Create a Device Group runtime without starting its worker processes."""
-    members = (_member("192.0.2.1"), _member("192.0.2.2"))
+    members = (_member(hass, "192.0.2.1"), _member(hass, "192.0.2.2"))
     member_entries = tuple(
         MagicMock(state=ConfigEntryState.LOADED, runtime_data=member)
         for member in members
@@ -78,6 +126,7 @@ def _runtime(
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={CONF_GROUP_ID: "test-device-group"},
+        options={"virtual_power_off": group_policy},
     )
     runtime = LIFXParallelGroupRuntime(hass, entry, member_entries, members)
     runtime.parallel = MagicMock()
@@ -85,10 +134,210 @@ def _runtime(
         return_value=ParallelDispatchResult(ParallelDispatchOutcome.COMPLETED, 1)
     )
     runtime.parallel.async_cancel_health = AsyncMock()
+    runtime.parallel.async_cancel_members = AsyncMock()
     runtime.parallel.async_request_reconnect = AsyncMock(
         return_value=ParallelDispatchResult(ParallelDispatchOutcome.COMPLETED, 1)
     )
     return runtime, members
+
+
+async def test_group_actual_off_policy_ignores_member_policy(
+    hass: HomeAssistant,
+) -> None:
+    """A group's actual-off request must bypass default-On member policies."""
+    runtime, members = _runtime(hass, group_policy=False)
+    for member in members:
+        member.data.power = 65535
+    await runtime.async_set_state(power=False)
+    commands = runtime.parallel.async_dispatch.await_args.args[0]
+    assert all(
+        command.kind == "power" and command.payload == (False, 0)
+        for command in commands
+    )
+    assert all(not member.virtual_off for member in members)
+
+
+async def test_group_prepares_virtual_members_without_visible_packets(
+    hass: HomeAssistant,
+) -> None:
+    """Omitting power changes next-on values without illuminating dark members."""
+    runtime, members = _runtime(hass)
+    for member in members:
+        member.data.power = 65535
+    await runtime.async_set_state(power=False)
+    for member in members:
+        member.data.color = member.data.color.replace(brightness=0)
+    runtime.parallel.async_dispatch.reset_mock()
+    await runtime.async_set_state(brightness=128)
+    runtime.parallel.async_dispatch.assert_not_awaited()
+    assert all(member.virtual_off for member in members)
+    assert all(member.resume_hsbk.brightness == 128 / 255 for member in members)
+
+
+async def test_group_partial_completion_commits_only_success(
+    hass: HomeAssistant,
+) -> None:
+    """COMPLETED may still contain members whose preparation failed."""
+    runtime, members = _runtime(hass)
+    for member in members:
+        member.data.power = 65535
+    runtime.parallel.async_dispatch.return_value = ParallelDispatchResult(
+        ParallelDispatchOutcome.COMPLETED, 1, frozenset({1})
+    )
+    await runtime.async_set_state(power=False)
+    assert members[0].virtual_off
+    assert not members[1].virtual_off
+    assert members[1].virtual_power_record.pending.delivery == "uncertain"
+
+
+async def test_group_recovery_preserves_individual_saved_brightness(
+    hass: HomeAssistant,
+) -> None:
+    """Bare group resume must not restore the average into every dark bulb."""
+    runtime, members = _runtime(hass)
+    members[0].data.color = members[0].data.color.replace(brightness=0.2)
+    members[1].data.color = members[1].data.color.replace(brightness=0.8)
+    for member in members:
+        member.data.power = 65535
+    await runtime.async_set_state(power=False)
+    await runtime.async_set_state(power=True)
+    commands = runtime.parallel.async_dispatch.await_args.args[0]
+    assert commands[0].payload[2] == 13107
+    assert commands[1].payload[2] == 52428
+    assert runtime.display_state.is_on
+
+
+def _exclude_preparing_member(
+    _hass: HomeAssistant,
+    _runtime: LIFXParallelGroupRuntime,
+    members: tuple[LIFXUpdateCoordinator, ...],
+) -> None:
+    members[1].last_update_success = False
+
+
+def _replace_preparing_member(
+    hass: HomeAssistant,
+    runtime: LIFXParallelGroupRuntime,
+    _members: tuple[LIFXUpdateCoordinator, ...],
+) -> None:
+    runtime.members[1] = _member(hass, "192.0.2.99")
+    runtime.member_entries[1].runtime_data = runtime.members[1]
+
+
+@pytest.mark.parametrize(
+    "change", [_exclude_preparing_member, _replace_preparing_member]
+)
+@pytest.mark.parametrize(
+    "gate_save", [1, 2], ids=["candidate-save", "first-completion-save"]
+)
+async def test_packet_free_prepare_rechecks_participating_binding(
+    hass: HomeAssistant,
+    change: Callable[
+        [HomeAssistant, LIFXParallelGroupRuntime, tuple[LIFXUpdateCoordinator, ...]],
+        None,
+    ],
+    gate_save: int,
+) -> None:
+    """A skipped old binding must not acquire the prepared next-on image."""
+    runtime, members = _runtime(hass)
+    for member in members:
+        member.data.power = 65535
+    await runtime.async_set_state(power=False)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    real_save = Store.async_save
+    calls = 0
+
+    async def save(
+        storage: Store[dict[str, object]], payload: dict[str, object]
+    ) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == gate_save:
+            entered.set()
+            await release.wait()
+        await real_save(storage, payload)
+
+    with patch(
+        "homeassistant.components.lifx.virtual_power.Store.async_save",
+        side_effect=save,
+        autospec=True,
+    ):
+        prepared = asyncio.create_task(runtime.async_set_state(brightness=128))
+        await entered.wait()
+        change(hass, runtime, members)
+        release.set()
+        await prepared
+    record = runtime._virtual_power_store.async_get_record(
+        members[1].virtual_power_serial
+    )
+    assert record.image.color.brightness == 1
+    assert record.virtual_off
+    assert record.pending is None
+
+
+async def test_cancelled_group_dispatch_releases_polling_guard(
+    hass: HomeAssistant,
+) -> None:
+    """A cancelled caller cannot suppress fresh reconciliation indefinitely."""
+    runtime, members = _runtime(hass)
+    for member in members:
+        member.data.power = 65535
+    entered = asyncio.Event()
+    never = asyncio.Event()
+
+    async def dispatch(
+        _commands: tuple[ParallelCommand | None, ...],
+        *,
+        owner: ParallelDispatchOwner | None = None,
+    ) -> ParallelDispatchResult:
+        entered.set()
+        await never.wait()
+        return ParallelDispatchResult(ParallelDispatchOutcome.COMPLETED, 1)
+
+    runtime.parallel.async_dispatch.side_effect = dispatch
+    task = asyncio.create_task(runtime.async_set_state(power=False))
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    members[0].data.color = members[0].data.color.replace(brightness=0)
+    await runtime._virtual_power_store.async_reconcile(
+        members[0].virtual_power_serial,
+        members[0].data,
+        now=dt_util.utcnow() + timedelta(seconds=1),
+    )
+    assert members[0].virtual_off
+    assert members[0].virtual_power_record.pending is None
+
+
+async def test_cancelled_group_save_releases_reservation(hass: HomeAssistant) -> None:
+    """Cancelling before dispatch leaves no active or issued destructive intent."""
+    runtime, members = _runtime(hass)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    real_save = Store.async_save
+
+    async def save(
+        storage: Store[dict[str, object]], payload: dict[str, object]
+    ) -> None:
+        entered.set()
+        await release.wait()
+        await real_save(storage, payload)
+
+    with patch(
+        "homeassistant.components.lifx.virtual_power.Store.async_save",
+        side_effect=save,
+        autospec=True,
+    ):
+        task = asyncio.create_task(runtime.async_set_state(power=False))
+        await entered.wait()
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert all(member.virtual_power_record.pending is None for member in members)
+    runtime.parallel.async_dispatch.assert_not_awaited()
 
 
 def test_members_are_not_ready_when_a_loaded_member_is_unavailable() -> None:
@@ -122,7 +371,9 @@ async def test_setup_retries_until_every_physical_member_is_ready(
         if state is None
         else MagicMock(
             state=state,
-            runtime_data=_member("192.0.2.1", last_update_success=last_update_success),
+            runtime_data=_member(
+                hass, "192.0.2.1", last_update_success=last_update_success
+            ),
         )
     )
     with (
@@ -224,7 +475,7 @@ async def test_member_reload_replaces_only_its_coordinator_and_reconnects_worker
 ) -> None:
     """A physical reload replaces only its Device Group member binding."""
     runtime, _members = _runtime(hass)
-    replacement = _member("192.0.2.99")
+    replacement = _member(hass, "192.0.2.99")
     runtime.parallel.async_request_reconnect = AsyncMock(
         return_value=ParallelDispatchResult(ParallelDispatchOutcome.COMPLETED, 1)
     )
@@ -245,7 +496,7 @@ async def test_member_reload_stays_unavailable_until_worker_reconnects(
 ) -> None:
     """A Group must not dispatch to the previous endpoint during handoff."""
     runtime, _members = _runtime(hass)
-    replacement = _member("192.0.2.99")
+    replacement = _member(hass, "192.0.2.99")
     reconnect_started = asyncio.Event()
     release_reconnect = asyncio.Event()
 
@@ -324,7 +575,7 @@ async def test_dispatch_does_not_schedule_a_physical_refresh(
     )
     runtime.parallel.async_dispatch.assert_awaited_once()
     for member in members:
-        member.async_schedule_post_command_refresh.assert_not_awaited()
+        member.device.refresh_state.assert_not_awaited()
 
 
 @pytest.mark.parametrize("power", [True, False])
@@ -332,6 +583,8 @@ async def test_group_dispatch_preserves_real_coordinator_data(
     hass: HomeAssistant, power: bool
 ) -> None:
     """Group notifications must not replace a physical member's typed state."""
+    manager = hass.data[DATA_LIFX_MANAGER] = LIFXManager(hass)
+    await manager.virtual_power.async_load()
     physical_entry = MockConfigEntry(domain=DOMAIN, title="Physical member")
     device = create_mock_light()
     device.port = 56700
@@ -378,7 +631,7 @@ async def test_group_dispatch_preserves_real_coordinator_data(
 @pytest.mark.enable_socket
 async def test_home_assistant_shutdown_stops_group_workers(hass: HomeAssistant) -> None:
     """Normal HA shutdown must release real workers before Python joins children."""
-    member = _member("127.0.0.1")
+    member = _member(hass, "127.0.0.1")
     physical_entry = MockConfigEntry(domain=DOMAIN, title="Shutdown member")
     physical_entry.add_to_hass(hass)
     physical_entry.runtime_data = member
@@ -461,7 +714,7 @@ async def test_dispatch_failure_is_silent_and_clears_the_projection(
     assert runtime._optimistic_state is None
     assert runtime._recovery_task is None
     for member in members:
-        member.async_schedule_post_command_refresh.assert_not_awaited()
+        member.device.refresh_state.assert_not_awaited()
 
 
 async def test_unavailable_group_state_request_is_a_silent_noop(
@@ -612,7 +865,7 @@ async def test_group_power_off_sends_brightness_zero_but_displays_off(
     assert runtime.display_state.color == (100, 200, 300, 3500)
     assert runtime.display_state.is_on is False
     assert all(member.virtual_off for member in members)
-    assert all(member.async_record_virtual_off.call_count == 1 for member in members)
+    assert all(member.resume_required for member in members)
 
 
 async def test_colorloop_uses_one_displayed_state_baseline_for_every_member(

@@ -1,5 +1,6 @@
 """Tests for the LIFX light platform."""
 
+import asyncio
 from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
@@ -36,6 +37,8 @@ from homeassistant.components.lifx.const import (
     ATTR_SKY_TYPE,
     ATTR_SPEED,
     ATTR_THEME,
+    DATA_LIFX_MANAGER,
+    LIFX_MIN_COLOR_RAMP,
     SERVICE_EFFECT_COLORLOOP,
     SERVICE_EFFECT_FLAME,
     SERVICE_EFFECT_MORPH,
@@ -48,7 +51,9 @@ from homeassistant.components.lifx.const import (
 from homeassistant.components.lifx.light import (
     ATTR_INFRARED,
     ATTR_ZONES,
-    LIFX_MIN_COLOR_RAMP,
+    LIFXLight,
+    LIFXMatrix,
+    LIFXMultiZone,
 )
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
@@ -110,6 +115,7 @@ from .helpers import (
 from tests.common import async_fire_time_changed
 
 ENTITY_ID = "light.my_group_my_bulb"
+VIRTUAL_POWER_SWITCH_ENTITY_ID = "switch.my_group_my_bulb_virtual_power_off"
 OTHER_IP_ADDRESS = "127.0.0.2"
 OTHER_SERIAL = "d073d5aabbcc"
 OTHER_MAC_ADDRESS = "d0:73:d5:aa:bb:cc"
@@ -847,7 +853,7 @@ async def test_power_transitions_use_seconds(
     """Test power transitions preserve existing on/off semantics in seconds."""
     device = create_mock_light()
     device.state.power = initial_power
-    await async_setup_lifx_entry(hass, device)
+    await async_setup_lifx_entry(hass, device, virtual_power_off=False)
 
     await hass.services.async_call(
         LIGHT_DOMAIN,
@@ -1602,7 +1608,7 @@ async def test_library_errors_become_home_assistant_errors(
     device = factory()
     device.state.power = 65535
     setattr(device, method, AsyncMock(side_effect=LifxError("boom")))
-    await async_setup_lifx_entry(hass, device)
+    await async_setup_lifx_entry(hass, device, virtual_power_off=False)
 
     with pytest.raises(HomeAssistantError, match="boom"):
         await hass.services.async_call(
@@ -1750,7 +1756,7 @@ async def test_direct_physical_power_off_does_not_create_virtual_off(
     device = create_mock_light()
     device.state.power = 65535
     device.state.color = HSBK(20.0, 0.25, 0.75, 3500)
-    entry = await async_setup_lifx_entry(hass, device)
+    entry = await async_setup_lifx_entry(hass, device, virtual_power_off=False)
 
     entry.runtime_data.async_record_virtual_off(device.state.color)
 
@@ -1764,3 +1770,381 @@ async def test_direct_physical_power_off_does_not_create_virtual_off(
     device.set_power.assert_awaited_once_with(False, duration=0.0)
     assert not entry.runtime_data.virtual_off
     assert entry.runtime_data.resume_hsbk == device.state.color
+
+
+@pytest.mark.parametrize(
+    ("default", "explicit", "expected"),
+    [
+        pytest.param(0, None, 0.25, id="implicit-zero"),
+        pytest.param(0.1, None, 0.25, id="implicit-short"),
+        pytest.param(0.8, None, 0.8, id="implicit-long"),
+        pytest.param(0.8, 0.0, 0.0, id="explicit-zero"),
+        pytest.param(0.8, 0.1, 0.1, id="explicit-short"),
+        pytest.param(0, 0.8, 0.8, id="explicit-long"),
+    ],
+)
+async def test_physical_ordinary_color_duration(
+    hass: HomeAssistant, default: float, explicit: float | None, expected: float
+) -> None:
+    """The SDK receives explicit sub-minimum transitions unchanged."""
+    device = create_mock_light()
+    device.state.power = 65535
+    entry = await async_setup_lifx_entry(hass, device)
+    entry.runtime_data.transition_on_duration = default
+    entry.runtime_data.transition_cross_duration = default
+    data = {ATTR_ENTITY_ID: ENTITY_ID, ATTR_BRIGHTNESS: 128}
+    if explicit is not None:
+        data[ATTR_TRANSITION] = explicit
+    await hass.services.async_call(LIGHT_DOMAIN, SERVICE_TURN_ON, data, blocking=True)
+    assert device.set_waveform_optional.await_args.kwargs["period"] == expected
+
+
+async def test_hidden_physical_color_preparation_stays_immediate(
+    hass: HomeAssistant,
+) -> None:
+    """On fade timing belongs to power, not the hidden color preparation."""
+    device = create_mock_light()
+    entry = await async_setup_lifx_entry(hass, device)
+    entry.runtime_data.transition_on_duration = 0.1
+    await hass.services.async_call(
+        LIGHT_DOMAIN,
+        SERVICE_TURN_ON,
+        {ATTR_ENTITY_ID: ENTITY_ID, ATTR_BRIGHTNESS: 128},
+        blocking=True,
+    )
+    assert device.set_waveform_optional.await_args.kwargs["period"] == 0
+    device.set_power.assert_awaited_once_with(True, duration=0.1)
+
+
+async def test_virtual_off_writes_zero_brightness_without_power(
+    hass: HomeAssistant,
+) -> None:
+    """Default-On policy turns a light dark without cutting its power."""
+    device = create_mock_light()
+    device.state.power = 65535
+    device.state.color = HSBK(20.0, 0.25, 0.75, 3500)
+    await async_setup_lifx_entry(hass, device)
+
+    await hass.services.async_call(
+        LIGHT_DOMAIN, SERVICE_TURN_OFF, {ATTR_ENTITY_ID: ENTITY_ID}, blocking=True
+    )
+
+    device.set_power.assert_not_awaited()
+    color = device.set_waveform_optional.await_args.args[0]
+    assert color.brightness == 0
+    assert device.set_waveform_optional.await_args.kwargs["set_brightness"] is True
+    assert hass.states.get(ENTITY_ID).state == "off"
+
+
+@pytest.mark.parametrize("policy_service", [SERVICE_TURN_ON, SERVICE_TURN_OFF])
+@pytest.mark.parametrize(
+    ("default", "transition_data", "expected_duration"),
+    [
+        pytest.param(2.0, {}, 2.0, id="default"),
+        pytest.param(2.0, {ATTR_TRANSITION: 5.0}, 5.0, id="override"),
+        pytest.param(2.0, {ATTR_TRANSITION: 0.0}, 0.0, id="explicit-zero"),
+        pytest.param(2.0, {ATTR_TRANSITION: 0.1}, 0.1, id="explicit-short"),
+        pytest.param(0.0, {}, 0.0, id="default-zero"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("color_data", "expected_color"),
+    [
+        pytest.param({}, HSBK(20.0, 0.25, 0.75, 3500), id="bare"),
+        pytest.param(
+            {ATTR_BRIGHTNESS: 128},
+            HSBK(20.0, 0.25, 128 / 255, 3500),
+            id="brightness",
+        ),
+        pytest.param(
+            {ATTR_COLOR_TEMP_KELVIN: 4500},
+            HSBK(20.0, 0.0, 0.75, 4500),
+            id="temperature",
+        ),
+    ],
+)
+async def test_virtual_off_recovery_uses_selected_transition(
+    hass: HomeAssistant,
+    policy_service: str,
+    default: float,
+    transition_data: dict[str, float],
+    expected_duration: float,
+    color_data: dict[str, int],
+    expected_color: HSBK,
+) -> None:
+    """Recovery fades the saved target regardless of the current off policy."""
+    device = create_mock_light()
+    device.state.power = 65535
+    device.state.color = HSBK(20.0, 0.25, 0.75, 3500)
+    entry = await async_setup_lifx_entry(hass, device)
+    entry.runtime_data.transition_on_duration = default
+
+    await hass.services.async_call(
+        LIGHT_DOMAIN, SERVICE_TURN_OFF, {ATTR_ENTITY_ID: ENTITY_ID}, blocking=True
+    )
+    await hass.services.async_call(
+        "switch",
+        policy_service,
+        {ATTR_ENTITY_ID: VIRTUAL_POWER_SWITCH_ENTITY_ID},
+        blocking=True,
+    )
+    device.state.color = device.state.color.replace(brightness=0)
+    device.set_waveform_optional.reset_mock()
+
+    await hass.services.async_call(
+        LIGHT_DOMAIN,
+        SERVICE_TURN_ON,
+        {ATTR_ENTITY_ID: ENTITY_ID, **transition_data, **color_data},
+        blocking=True,
+    )
+
+    assert_color_written(device, expected_color, period=expected_duration)
+    device.set_power.assert_not_awaited()
+    assert hass.states.get(ENTITY_ID).state == STATE_ON
+
+
+async def test_power_omitted_prepares_next_on_while_dark(
+    hass: HomeAssistant,
+) -> None:
+    """set_state without power updates the next-on image without exposing it."""
+    device = create_mock_light()
+    device.state.power = 65535
+    device.state.color = HSBK(20.0, 0.25, 0.75, 3500)
+    entry = await async_setup_lifx_entry(hass, device)
+
+    await hass.services.async_call(
+        LIGHT_DOMAIN, SERVICE_TURN_OFF, {ATTR_ENTITY_ID: ENTITY_ID}, blocking=True
+    )
+    device.set_waveform_optional.reset_mock()
+
+    await hass.services.async_call(
+        DOMAIN,
+        "set_state",
+        {
+            ATTR_ENTITY_ID: ENTITY_ID,
+            ATTR_BRIGHTNESS: 100,
+            ATTR_COLOR_TEMP_KELVIN: 3000,
+        },
+        blocking=True,
+    )
+
+    device.set_waveform_optional.assert_not_awaited()
+    device.set_power.assert_not_awaited()
+    assert hass.states.get(ENTITY_ID).state == "off"
+    image = entry.runtime_data.virtual_power_record.image
+    assert image is not None
+    assert image.color.brightness == 100 / 255
+    assert image.color.kelvin == 3000
+
+
+@pytest.mark.parametrize(
+    ("default", "transition_data", "expected_duration"),
+    [
+        pytest.param(2.0, {}, 2.0, id="default"),
+        pytest.param(2.0, {ATTR_TRANSITION: 5.0}, 5.0, id="override"),
+        pytest.param(2.0, {ATTR_TRANSITION: 0.0}, 0.0, id="explicit-zero"),
+        pytest.param(2.0, {ATTR_TRANSITION: 0.1}, 0.1, id="explicit-short"),
+    ],
+)
+async def test_actually_off_recovery_writes_hidden_then_powers_on(
+    hass: HomeAssistant,
+    default: float,
+    transition_data: dict[str, float],
+    expected_duration: float,
+) -> None:
+    """An actually-off virtual-derived light prepares its image before powering on."""
+    device = create_mock_light()
+    device.state.power = 65535
+    device.state.color = HSBK(20.0, 0.25, 0.75, 3500)
+    entry = await async_setup_lifx_entry(hass, device)
+    entry.runtime_data.transition_on_duration = default
+
+    await hass.services.async_call(
+        LIGHT_DOMAIN, SERVICE_TURN_OFF, {ATTR_ENTITY_ID: ENTITY_ID}, blocking=True
+    )
+    await hass.services.async_call(
+        "switch",
+        SERVICE_TURN_OFF,
+        {ATTR_ENTITY_ID: VIRTUAL_POWER_SWITCH_ENTITY_ID},
+        blocking=True,
+    )
+    device.set_waveform_optional.reset_mock()
+
+    async def _set_power(power: bool, duration: float = 0.0) -> None:
+        device.state.power = 65535 if power else 0
+
+    device.set_power.side_effect = _set_power
+    device.state.power = 0
+
+    await hass.services.async_call(
+        LIGHT_DOMAIN,
+        SERVICE_TURN_ON,
+        {ATTR_ENTITY_ID: ENTITY_ID, **transition_data},
+        blocking=True,
+    )
+
+    color = device.set_waveform_optional.await_args.args[0]
+    assert color.brightness == 0.75
+    assert device.set_waveform_optional.await_args.kwargs["period"] == 0
+    device.set_power.assert_awaited_once_with(True, duration=expected_duration)
+    assert hass.states.get(ENTITY_ID).state == "on"
+
+
+@pytest.mark.parametrize("extended", [True, False], ids=["extended", "legacy"])
+async def test_multizone_recovery_preserves_pattern_and_duration(
+    hass: HomeAssistant, extended: bool
+) -> None:
+    """A virtual-off strip restores its complete pattern over the selected fade."""
+    device = create_mock_multizone_light(extended=extended)
+    device.state.power = 65535
+    colors = list(device.state.zones)
+    await async_setup_lifx_entry(hass, device)
+
+    await hass.services.async_call(
+        LIGHT_DOMAIN, SERVICE_TURN_OFF, {ATTR_ENTITY_ID: ENTITY_ID}, blocking=True
+    )
+    device.set_all_color_zones.reset_mock()
+
+    await hass.services.async_call(
+        LIGHT_DOMAIN,
+        SERVICE_TURN_ON,
+        {ATTR_ENTITY_ID: ENTITY_ID, ATTR_TRANSITION: 2.0},
+        blocking=True,
+    )
+
+    device.set_all_color_zones.assert_awaited_once_with(colors, duration=2.0)
+    device.set_power.assert_not_awaited()
+
+
+async def test_matrix_recovery_preserves_pattern_and_duration(
+    hass: HomeAssistant,
+) -> None:
+    """A virtual-off chain restores each tile with a millisecond fade duration."""
+    device = create_reference_matrix_light()
+    colors = list(device.state.tile_colors)
+    await async_setup_lifx_entry(hass, device)
+
+    await hass.services.async_call(
+        LIGHT_DOMAIN, SERVICE_TURN_OFF, {ATTR_ENTITY_ID: ENTITY_ID}, blocking=True
+    )
+    device.set_matrix_colors.reset_mock()
+
+    await hass.services.async_call(
+        LIGHT_DOMAIN,
+        SERVICE_TURN_ON,
+        {ATTR_ENTITY_ID: ENTITY_ID, ATTR_TRANSITION: 2.0},
+        blocking=True,
+    )
+
+    assert device.set_matrix_colors.await_args_list == [
+        call(tile.tile_index, colors[index * 64 : (index + 1) * 64], duration=2000)
+        for index, tile in enumerate(device.state.chain)
+    ]
+    device.set_power.assert_not_awaited()
+
+
+async def test_interrupted_recovery_retains_resume_target(
+    hass: HomeAssistant,
+) -> None:
+    """An intermediate fade observation cannot become the next recovery target."""
+    device = create_mock_light()
+    device.state.power = 65535
+    device.state.color = HSBK(20.0, 0.25, 0.75, 3500)
+    entry = await async_setup_lifx_entry(hass, device)
+
+    for service in (SERVICE_TURN_OFF, SERVICE_TURN_ON):
+        await hass.services.async_call(
+            LIGHT_DOMAIN,
+            service,
+            {ATTR_ENTITY_ID: ENTITY_ID, ATTR_TRANSITION: 5.0},
+            blocking=True,
+        )
+    device.state.color = device.state.color.replace(brightness=0.2)
+    await entry.runtime_data.async_request_refresh()
+
+    await hass.services.async_call(
+        LIGHT_DOMAIN,
+        SERVICE_TURN_OFF,
+        {ATTR_ENTITY_ID: ENTITY_ID, ATTR_TRANSITION: 1.0},
+        blocking=True,
+    )
+    device.set_waveform_optional.reset_mock()
+
+    await hass.services.async_call(
+        LIGHT_DOMAIN,
+        SERVICE_TURN_ON,
+        {ATTR_ENTITY_ID: ENTITY_ID, ATTR_TRANSITION: 5.0},
+        blocking=True,
+    )
+
+    assert_color_written(device, HSBK(20.0, 0.25, 0.75, 3500), period=5.0)
+    device.set_power.assert_not_awaited()
+    assert hass.states.get(ENTITY_ID).state == STATE_ON
+
+
+@pytest.mark.parametrize(
+    ("factory", "entity_type", "method", "colors_index"),
+    [
+        pytest.param(
+            create_mock_multizone_light,
+            LIFXMultiZone,
+            "set_all_color_zones",
+            0,
+            id="strip",
+        ),
+        pytest.param(
+            create_mock_matrix_light, LIFXMatrix, "set_matrix_colors", 1, id="matrix"
+        ),
+    ],
+)
+async def test_stale_strip_refresh_cannot_relight_newer_off(
+    hass: HomeAssistant,
+    factory: Callable[[], MockDevice],
+    entity_type: type[LIFXLight],
+    method: str,
+    colors_index: int,
+) -> None:
+    """Releasing an old pre-merge read must not allow a positive write after off."""
+    device = factory()
+    device.state.power = 65535
+    entry = await async_setup_lifx_entry(hass, device)
+    entity = entity_type(entry.runtime_data, hass.data[DATA_LIFX_MANAGER])
+    entity.update_during_transition = AsyncMock()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def refresh() -> None:
+        entered.set()
+        await release.wait()
+
+    entry.runtime_data.async_refresh = refresh
+    old = asyncio.create_task(entity.async_turn_on(brightness=64))
+    await entered.wait()
+    await entity.async_turn_off()
+    release.set()
+    await old
+    writer = getattr(device, method)
+    assert len(writer.await_args_list) == 1
+    assert all(color.brightness == 0 for color in writer.await_args.args[colors_index])
+
+
+async def test_strip_commits_the_refreshed_pattern_it_actually_wrote(
+    hass: HomeAssistant,
+) -> None:
+    """Externally changed omitted colors survive a subsequent virtual off/on."""
+    device = create_mock_multizone_light()
+    device.state.power = 65535
+    entry = await async_setup_lifx_entry(hass, device)
+    entity = LIFXMultiZone(entry.runtime_data, hass.data[DATA_LIFX_MANAGER])
+    entity.update_during_transition = AsyncMock()
+
+    async def refresh() -> None:
+        device.state.zones[1] = device.state.zones[1].replace(hue=120)
+
+    entry.runtime_data.async_refresh = refresh
+    await entity.async_turn_on(brightness=64, transition=0.8)
+    await entity.async_turn_off()
+    await entity.async_turn_on()
+    restored = device.set_all_color_zones.await_args.args[0]
+    assert restored[1].hue == 120
+    assert restored[1].brightness == 64 / 255

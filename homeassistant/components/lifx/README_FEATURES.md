@@ -40,6 +40,29 @@ vary with its firmware, Wi-Fi, and internal rendering.
 > brightness in the LIFX app. Home Assistant presents the group and individual
 > lights as off.
 
+## 🔌 Virtual Power Off
+
+Every physical LIFX light and Device Group has a **Virtual Power Off**
+configuration switch, defaulting to **On**. It controls how the light responds
+to an off command:
+
+| Target | Virtual Power Off | Result |
+|--------|-------------------|--------|
+| Physical light | On | Virtual off — brightness fades to zero, power stays on |
+| Physical light | Off | Actual power-off — hardware power is cut |
+| Device Group | On | Virtual off for every member, regardless of their individual settings |
+| Device Group | Off | Actual power-off for every member, regardless of their individual settings |
+
+Changing the toggle affects future off commands only — it sends no light
+packets and does not alter an existing virtual-off state. A virtually-off
+light remains recognisable and restorable regardless of the toggle setting:
+turning it on restores its saved brightness and colour (including per-zone
+patterns on multizone and matrix lights), and turning it off again uses the
+current toggle setting.
+
+The toggle is independent per light and per Device Group, and is persisted
+across reloads and restarts.
+
 ## 🌈 Fade and transition defaults
 
 Every physical LIFX light and Device Group has three configurable Number

@@ -1,5 +1,6 @@
 """Exercise real LIFX workers in an interpreter without pytest's import cache."""
 
+import asyncio
 import importlib
 import json
 import multiprocessing as mp
@@ -9,6 +10,7 @@ import socket
 import struct
 import sys
 import threading
+from types import SimpleNamespace
 
 HEADER = struct.Struct("<HHI8s6sBBQHH")
 
@@ -23,6 +25,35 @@ def respond_to_echo(receiver: socket.socket, packets: list[bytes]) -> None:
     fields[5] = 0
     receiver.sendto(HEADER.pack(*fields) + data[HEADER.size :], address)
     packets.append(data)
+
+
+def acknowledge(receiver: socket.socket, data: bytes, address: tuple[str, int]) -> None:
+    """Encode the matching protocol acknowledgement independently of the worker."""
+    fields = list(HEADER.unpack_from(data))
+    fields[0] = HEADER.size
+    fields[5] = 0
+    fields[8] = 45
+    receiver.sendto(HEADER.pack(*fields), address)
+
+
+def respond_to_batch(receiver: socket.socket, received: list[bytes]) -> None:
+    """Acknowledge a burst in reverse order."""
+    messages = [receiver.recvfrom(2048), receiver.recvfrom(2048)]
+    for data, address in reversed(messages):
+        acknowledge(receiver, data, address)
+    received.extend(data for data, _address in messages)
+
+
+def respond_after_cancel(
+    receiver: socket.socket, received: list[bytes], entered: threading.Event
+) -> None:
+    """Withhold the old ACK, then acknowledge only the replacement command."""
+    data, _address = receiver.recvfrom(2048)
+    received.append(data)
+    entered.set()
+    data, address = receiver.recvfrom(2048)
+    received.append(data)
+    acknowledge(receiver, data, address)
 
 
 def main() -> None:
@@ -98,6 +129,67 @@ def main() -> None:
                         and not result.failed_member_indexes
                     )
                     evidence["echo_packets"] = len(packets)
+                if operation == "batch":
+                    receiver.settimeout(5)
+                    received: list[bytes] = []
+                    responder = threading.Thread(
+                        target=respond_to_batch, args=(receiver, received), daemon=True
+                    )
+                    responder.start()
+                    payload = struct.pack("<BHHHHI", 0, 100, 200, 300, 3500, 0)
+                    command = parallel.ParallelCommand(
+                        "packet_batch",
+                        (
+                            (
+                                parallel.ParallelPacket(102, payload),
+                                parallel.ParallelPacket(102, payload),
+                            ),
+                        ),
+                    )
+                    result = runtime._queue_dispatch((command,))
+                    responder.join(timeout=5)
+                    evidence["batch_completed"] = (
+                        result.outcome == parallel.ParallelDispatchOutcome.COMPLETED
+                    )
+                    evidence["packet_count"] = len(received)
+                if operation == "cancel":
+                    receiver.settimeout(5)
+                    received = []
+                    entered = threading.Event()
+                    responder = threading.Thread(
+                        target=respond_after_cancel,
+                        args=(receiver, received, entered),
+                        daemon=True,
+                    )
+                    responder.start()
+
+                    async def cancel_and_replace() -> None:
+                        runtime.hass = SimpleNamespace(
+                            async_add_executor_job=asyncio.to_thread
+                        )
+                        command = parallel.ParallelCommand(
+                            "color",
+                            (100, 200, 300, 3500, 0),
+                            parallel.ParallelCommand("power", (True, 0)),
+                        )
+                        old = asyncio.create_task(runtime.async_dispatch((command,)))
+                        assert await asyncio.to_thread(entered.wait, 5)
+                        await runtime.async_cancel_members(frozenset({0}))
+                        evidence["cancelled"] = (
+                            await old
+                        ).outcome == parallel.ParallelDispatchOutcome.SUPERSEDED
+                        result = await runtime.async_dispatch(
+                            (parallel.ParallelCommand("power", (False, 0)),)
+                        )
+                        evidence["replacement_completed"] = (
+                            result.outcome == parallel.ParallelDispatchOutcome.COMPLETED
+                        )
+
+                    asyncio.run(cancel_and_replace())
+                    responder.join(timeout=5)
+                    evidence["packet_types"] = [
+                        HEADER.unpack_from(data)[8] for data in received
+                    ]
         finally:
             dispatcher = runtime._dispatcher
             runtime._stop()

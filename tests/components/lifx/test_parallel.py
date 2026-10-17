@@ -1,6 +1,7 @@
 """Tests for LIFX Device Group packet dispatch."""
 
 import struct
+import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -15,6 +16,9 @@ from homeassistant.components.lifx.parallel import (
     SET_POWER,
     LIFXParallelRuntime,
     ParallelCommand,
+    ParallelDispatchOutcome,
+    ParallelDispatchOwner,
+    ParallelPacket,
     ParallelTransport,
     _dispatch_prepared,
     _DispatchRequest,
@@ -24,7 +28,117 @@ from homeassistant.components.lifx.parallel import (
     _wait_for_ack,
     _worker,
 )
+from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
+
+
+async def test_old_owner_cancellation_cannot_cancel_newer_pending_request(
+    hass: HomeAssistant,
+) -> None:
+    """An old caller's delayed cleanup must not seize a new request by slot."""
+    runtime = LIFXParallelRuntime(hass, ())
+    runtime._dispatcher = MagicMock()
+    runtime._current_generation = SimpleNamespace(value=2)
+    runtime._request_id = 2
+    old_owner = ParallelDispatchOwner()
+    new_owner = ParallelDispatchOwner()
+    newer = _DispatchRequest(
+        2, (ParallelCommand("power", (True, 900)),), threading.Event(), owner=new_owner
+    )
+    runtime._pending_dispatch = newer
+    await runtime.async_cancel_members(frozenset({0}), owner=old_owner)
+    assert runtime._pending_dispatch is newer
+    assert newer.result is None
+    assert not newer.done.is_set()
+    assert runtime._current_generation.value == 2
+    assert not new_owner.cancelled
+
+
+def test_cancelled_owner_cannot_enter_queue_after_cleanup() -> None:
+    """A delayed executor admission must respect cancellation of its owner."""
+    runtime = LIFXParallelRuntime(MagicMock(), ())
+    runtime._workers = [MagicMock()]
+    owner = ParallelDispatchOwner(cancelled=True)
+    result = runtime._queue_dispatch(
+        (ParallelCommand("power", (True, 0)),), owner=owner
+    )
+    assert result.outcome is ParallelDispatchOutcome.SUPERSEDED
+    assert runtime._pending_dispatch is None
+
+
+def test_packet_batch_collects_every_ack_out_of_order() -> None:
+    """A later packet's ACK must not be discarded while waiting for the first."""
+    target = bytes((1,)) * 8
+    udp = MagicMock()
+    pipe = MagicMock()
+    pipe.poll.return_value = False
+    udp.send.side_effect = len
+    udp.recv.side_effect = [
+        _header(ACKNOWLEDGEMENT, 99, 9, target, 0),
+        _header(ACKNOWLEDGEMENT, 1, 10, target, 0),
+        _header(ACKNOWLEDGEMENT, 1, 9, target, 0),
+    ]
+    command = ParallelCommand(
+        "packet_batch",
+        ((ParallelPacket(102, b"first"), ParallelPacket(102, b"second")),),
+    )
+    sequence = iter((9, 10))
+    with patch.object(
+        parallel, "_wait_for_dispatch_release", return_value=time.monotonic() + 1
+    ):
+        _dispatch_prepared(
+            udp,
+            1,
+            target,
+            pipe,
+            3,
+            0,
+            0,
+            command,
+            True,
+            time.monotonic() + 1,
+            SimpleNamespace(value=3),
+            MagicMock(),
+            sequence.__next__,
+            False,
+        )
+    assert udp.send.call_count == 2
+    assert [call.args[0][HEADER.size :] for call in udp.send.call_args_list] == [
+        b"first",
+        b"second",
+    ]
+    assert pipe.send.call_args.args[0][0] == "ACKED"
+
+
+def test_packet_batch_missing_ack_does_not_confirm_stage() -> None:
+    """Sending every packet is not sufficient to release dependent visible work."""
+    target = bytes(8)
+    udp = MagicMock()
+    pipe = MagicMock()
+    pipe.poll.return_value = False
+    udp.send.side_effect = len
+    udp.recv.side_effect = TimeoutError
+    command = ParallelCommand("packet_batch", ((ParallelPacket(102, b"one"),),))
+    with patch.object(
+        parallel, "_wait_for_dispatch_release", return_value=time.monotonic() + 0.005
+    ):
+        _dispatch_prepared(
+            udp,
+            1,
+            target,
+            pipe,
+            3,
+            0,
+            0,
+            command,
+            True,
+            time.monotonic() + 0.005,
+            SimpleNamespace(value=3),
+            MagicMock(),
+            lambda: 9,
+            False,
+        )
+    assert pipe.send.call_args.args[0][0] == "ACK_TIMEOUT"
 
 
 def test_set_power_does_not_request_an_ack() -> None:

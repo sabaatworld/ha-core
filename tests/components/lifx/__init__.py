@@ -30,7 +30,7 @@ UPDATE_INTERVAL = timedelta(seconds=15)
 
 
 async def async_setup_lifx_entry(
-    hass: HomeAssistant, device: Device
+    hass: HomeAssistant, device: Device, *, virtual_power_off: bool | None = None
 ) -> MockConfigEntry:
     """Set up a config entry for one typed LIFX device."""
     entry = MockConfigEntry(
@@ -38,6 +38,9 @@ async def async_setup_lifx_entry(
         title=DEFAULT_ENTRY_TITLE,
         data={CONF_HOST: IP_ADDRESS},
         unique_id=SERIAL,
+        options={}
+        if virtual_power_off is None
+        else {"virtual_power_off": virtual_power_off},
     )
     entry.add_to_hass(hass)
     with patch("homeassistant.components.lifx.Device.connect", return_value=device):
